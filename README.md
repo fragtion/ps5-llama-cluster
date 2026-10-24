@@ -60,7 +60,7 @@ The guide has three parts:
 | **Pooled** (both consoles) | Qwen3.8-27B-GSQ-RCO **IQ3_S**-mtp (11.3 GiB) | 262,144, q8_0 KV | yes | ~21 tok/s code, ~14 tok/s prose |
 | **Standalone** (one console) | Qwen3.8-27B-GSQ-RCO **IQ3_XXS**-mtp (9.7 GiB) | 60,000, q4_0 KV | no | – |
 
-All measured on our pair with MTP speculative decoding (`--spec-type draft-mtp`).
+Measured with MTP speculative decoding (`--spec-type draft-mtp`).
 - **Long prompts:** a 77K-token prompt was read at 76 tok/s on average, then generated at 8.8 tok/s.
 - **Two slots** (`-np 2`) share the 262K KV pool, so a side request doesn't evict the main
   conversation. Two requests running at once got 9.4 + 10.9 tok/s.
@@ -72,11 +72,11 @@ weights can live on a cheap HDD or USB drive.
 
 ## What you need
 
-- **Two PS5 consoles that can be jailbroken.** Ours are on firmware **13.60**; the loader we used
-  is built for exactly that firmware ([Part 0](#0-boot-linux)). Don't update a console you want
-  to use for this: newer firmware can close the exploit.
-- **A USB SSD or drive per console** for Ubuntu and the models: 32 GB at minimum. Ours are 32 GB
-  mSATA SSDs in USB enclosures, which is tight (see [disk space](#disk-space-is-tight)).
+- **Two PS5 consoles that can be jailbroken.** This guide was written on firmware **13.60**, and
+  the loader it uses is built for exactly that firmware ([Part 0](#0-boot-linux)). Don't update a
+  console you want to use for this: newer firmware can close the exploit.
+- **A USB SSD or drive per console** for Ubuntu and the models: 32 GB at minimum, which is tight
+  (see [disk space](#disk-space-is-tight)).
 - **Gigabit ethernet** between the consoles, through a switch or the same LAN. Wi-Fi works for
   management, but the pool needs the wire.
 - **A PC on the same LAN** to host the jailbreak page, flash the drives and SSH in.
@@ -140,7 +140,7 @@ kernel 7.1.7). The loader payload came from the **soniciso1 fork**
    - `cmdline.txt`: append `ttm.pages_limit=4063232`. That is 15.5 GiB of GTT in 4 KiB pages; the
      default cap is lower, and the GPU reads GTT as fast as the carve-out.
 
-   Ours reads:
+   A complete line looks like this:
 
    ```
    root=LABEL=ubuntu2604 rw rootwait console=ttyTitania0 console=tty0 video=DP-1:1920x1080@60 mitigations=off idle=halt preempt=full ttm.pages_limit=4063232
@@ -273,10 +273,9 @@ mkdir -p /root/bin /root/logs && cp pool/bin/* /root/bin/ && chmod +x /root/bin/
 
 - **The source.** The script builds upstream llama.cpp at the commit we tested (`5f5acfe`,
   2026-10-22). Newer commits should work if they still accept every flag the run scripts use.
-  Our consoles actually run that commit plus one more from
-  [fragtion/llama.cpp](https://github.com/fragtion/llama.cpp)'s `ternary-pq2-ptq` branch, which
-  adds ternary quantisation types; the script's header shows how to build it. The models here
-  don't need it.
+  The script's header also shows how to add the ternary quantisation types from
+  [fragtion/llama.cpp](https://github.com/fragtion/llama.cpp)'s `ternary-pq2-ptq` branch; the
+  models here don't need them.
 - **Same commit on both.** Build the same commit on both consoles: the RPC protocol must match.
 - **`GGML_SCHED_MAX_COPIES=2`** halves the compute buffers that pipeline parallelism allocates on
   every device, at no measurable speed cost. The default of 4 cost ~0.8 GB per GPU.
@@ -423,10 +422,9 @@ systemctl daemon-reload
 > [!NOTE]
 > **Why the gateway prefers the worker (ps5b).** Either console can run the gateway, but while
 > pooled, the coordinator's host RAM is the tightest resource in the cluster: llama-server keeps
-> its context checkpoints there, among other things. We measured only ~290 MB free on it after a
-> 77K-token prompt. The worker only lends its GPU and has more room
-> (~830 MB available with LiteLLM running). keepalived therefore gives the worker the higher
-> priority, so the worker takes the VIP when both consoles start together. With `nopreempt`, a
+> its context checkpoints there, among other things, and a long prompt leaves it only a few
+> hundred MB. The worker only lends its GPU and has more room. keepalived therefore gives the
+> worker the higher priority, so it takes the VIP when both consoles start together. With `nopreempt`, a
 > console that already holds the VIP keeps it. If the coordinator ends up with it after a
 > failover, it keeps it until it next stops; that's fine, just less roomy.
 
@@ -533,9 +531,8 @@ Ethernet and Wi-Fi both get addresses in your LAN. By default Linux answers ARP 
 addresses on any interface. The router can then learn the wrong MAC for an address, and
 NetworkManager reports address conflicts. `92-llm-arp.conf` fixes it.
 - **Check the route:** `ip route get <other console>` should say `dev enp64s0f2` (ethernet).
-- **What went wrong for us:** when one console stopped installing its /24 routes, pool traffic
-  went out over Wi-Fi via the router. Short prompts took 7–20 s instead of 2–5. A
-  `systemctl restart NetworkManager` fixed it.
+- **Symptom:** if a console stops installing its LAN routes, pool traffic goes out over Wi-Fi via
+  the router and every request slows down by seconds. `systemctl restart NetworkManager` fixes it.
 - **Part 2 sidesteps this:** console-to-console traffic uses the link subnet.
 
 #### The web UI hides `*-mtp.gguf`
@@ -543,10 +540,12 @@ llama.cpp's web UI treats model names ending in `-mtp` as MTP draft sidecars and
 `fetch-models.sh` therefore renames the files to `_mtp`, and the run scripts pass `--alias`.
 
 #### Disk space is tight
-A 32 GB drive holds the debloated Ubuntu, the build (~0.7 GB), the LiteLLM venv (~0.7 GB) and
-~23 GB of models on the coordinator, with ~2 GB to spare. On the worker, the RPC weight cache
-(`/root/.cache/llama.cpp/rpc`) takes ~7 GB per model version it has received. It isn't pruned,
-so clear it after changing models or builds.
+A 32 GB drive fits the debloated Ubuntu, the build, the LiteLLM venv and both models on the
+coordinator, with little to spare. On the worker, the RPC weight cache
+(`/root/.cache/llama.cpp/rpc`) holds a copy of the worker's share of each model version it has
+received. Keep it: on later pool starts the worker reads those weights from its own drive instead
+of over the network, which is faster even on a USB drive. It isn't pruned, so clear it after
+changing models or builds.
 
 #### Reboots
 - **Any reboot drops the jailbreak,** including `systemctl reboot`. Someone has to re-run it at
@@ -555,8 +554,8 @@ so clear it after changing models or builds.
   jumps when NTP syncs. `llm-peerd` therefore times everything with a monotonic clock.
 
 #### The router may not answer the ethernet port
-On our network, the router never answered ARP on the consoles' ethernet ports, though every
-other LAN host could reach them. Internet access stays on Wi-Fi in that case, which is fine.
+Some routers never answer ARP on the consoles' ethernet ports, though every other LAN host can
+reach them. Internet access stays on Wi-Fi in that case, which is fine.
 LAN clients, Wi-Fi clients included, reach the ethernet addresses and the VIP normally.
 
 #### Temperatures
