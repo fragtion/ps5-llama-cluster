@@ -499,6 +499,12 @@ cp my-script.sh /root/sync/     # on either console: it's on both within seconds
 The routing hook asks both daemons for their status before choosing (cached 5 s). A console
 that is off therefore costs nothing; a plain connection to it would hang until the timeout.
 
+> [!NOTE]
+> **No admin UI.** LiteLLM's web UI (`/ui`) needs a PostgreSQL database; this setup runs without
+> one, so the login answers "Not connected to DB!". Everything the gateway does is in
+> `config.yaml`. To look at it from a browser, open `http://<vip>:4000/`, authorize with the
+> master key and try `/health` or `/model/info`.
+
 ---
 
 ## Lessons learned / troubleshooting
