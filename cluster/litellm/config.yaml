@@ -1,0 +1,70 @@
+# LiteLLM gateway: one OpenAI-compatible endpoint, http://<gateway vip>:4000/v1, for every model server.
+# The gateway address floats between the PS5s (keepalived); the console holding it runs this gateway.
+# vision_router.py (the callback below) picks the PS5 and decides where requests with images go.
+model_list:
+  # `ps5`: whichever PS5 serves. vision_router.py reads both consoles' :50060/status and sends the
+  # request to ps5a (pooled: IQ3_S + vision, 262K; or standalone: IQ3_XXS, 60K, text only), else to
+  # ps5b standalone. If it can't tell, `order` tries ps5a first. `ps5a` and `ps5b` pin a console.
+  # The addresses are the ethernet link from /etc/llm-cluster.yaml, which either console reaches directly.
+  # Each llama-server runs one model and answers whatever name is asked for.
+  - model_name: ps5
+    litellm_params:
+      model: openai/ps5
+      api_base: http://10.13.37.1:1234/v1
+      api_key: none
+      order: 1
+      timeout: 1800
+      stream_timeout: 1800
+  - model_name: ps5
+    litellm_params:
+      model: openai/ps5
+      api_base: http://10.13.37.2:1234/v1
+      api_key: none
+      order: 2
+      timeout: 1800
+      stream_timeout: 1800
+  - model_name: ps5a
+    litellm_params:
+      model: openai/ps5
+      api_base: http://10.13.37.1:1234/v1
+      api_key: none
+      timeout: 1800
+      stream_timeout: 1800
+  - model_name: ps5b
+    litellm_params:
+      model: openai/ps5
+      api_base: http://10.13.37.2:1234/v1
+      api_key: none
+      timeout: 1800
+      stream_timeout: 1800
+
+  # Where `ps5` requests with images go while no pool is up (standalone mode is text only): any
+  # OpenAI-compatible server with a vision model, e.g. LM Studio or llama-server on another machine.
+  # Set VISION_FALLBACK_API_BASE and VISION_FALLBACK_MODEL in /etc/litellm/env.
+  - model_name: vision-fallback
+    litellm_params:
+      model: os.environ/VISION_FALLBACK_MODEL
+      api_base: os.environ/VISION_FALLBACK_API_BASE
+      api_key: none
+      timeout: 600
+
+  # Any other model server on your network can sit behind the same gateway. If it is text only, list
+  # its model_name in TEXT_ONLY_MODELS (/etc/litellm/env) and images sent to it become descriptions.
+  # - model_name: desktop
+  #   litellm_params:
+  #     model: openai/<model id on that server>
+  #     api_base: http://192.168.1.10:8080/v1
+  #     api_key: os.environ/DESKTOP_API_KEY
+  #     timeout: 1800
+
+router_settings:
+  num_retries: 1         # a refused connection fails fast; the retry goes to the next live deployment
+  allowed_fails: 0       # a deployment that fails sits out the cooldown
+  cooldown_time: 30
+
+litellm_settings:
+  drop_params: false     # keep llama.cpp's extra parameters
+  callbacks: vision_router.proxy_handler_instance
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

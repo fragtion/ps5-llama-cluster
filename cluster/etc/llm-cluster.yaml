@@ -1,0 +1,23 @@
+# The PS5 pair. Identical on both consoles (llm-sync copies it); each node finds itself by hostname.
+# After editing, run `llm-cluster ensure` on both (llm-sync does it on the peer).
+
+# Direct ps5a<->ps5b traffic (RPC, peer status, VRRP, llm-sync): secondary addresses on the ethernet
+# ports, so it never depends on the LAN's addresses or routes.
+link:
+  interface: enp64s0f2
+  subnet: 10.13.37.0/30
+
+nodes:
+  ps5a:
+    role: coordinator   # runs the pool (has the IQ3_S weights and the vision projector)
+    link: 10.13.37.1
+  ps5b:
+    role: worker        # lends its GPU to the pool, standalone otherwise
+    link: 10.13.37.2
+
+# LiteLLM answers on this floating LAN address, held by one console at a time (keepalived).
+gateway:
+  vip: 192.168.1.60/24   # a free address in your LAN, outside the DHCP pool
+  interface: enp64s0f2
+  vrid: 90
+  port: 4000          # where litellm.service listens (informational)

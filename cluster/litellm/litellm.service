@@ -1,0 +1,21 @@
+[Unit]
+Description=LiteLLM gateway: one OpenAI-compatible endpoint for the PS5s (started by keepalived on the console holding the gateway address)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/litellm/env
+# no fetch of the model price map from GitHub at start; quiet logs
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_LOG=ERROR
+WorkingDirectory=/etc/litellm
+ExecStart=/opt/litellm/bin/litellm --config /etc/litellm/config.yaml --host 0.0.0.0 --port 4000 --num_workers 1
+Restart=on-failure
+RestartSec=10
+# host RAM is what llama-server runs out of: cap the gateway and let the kernel take it first
+MemoryMax=600M
+OOMScoreAdjust=800
+StandardOutput=append:/root/logs/litellm.log
+StandardError=append:/root/logs/litellm.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Run llama.cpp pooled while the other PS5 is up, standalone otherwise
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# role and peer: /etc/llm-cluster.yaml
+ExecStart=/usr/bin/python3 /root/bin/llm-peerd.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/logs/llm-peer.log
+StandardError=append:/root/logs/llm-peer.log
+
+[Install]
+WantedBy=multi-user.target

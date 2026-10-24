@@ -1,0 +1,25 @@
+#!/bin/sh
+# Copy this console's LLM software and config to the other console over the ethernet link, so either
+# one can run the whole stack. Run it on the console you changed.
+#   llm-sync      copy, then apply on the peer: daemon-reload, sysctl, `llm-cluster ensure`
+#   llm-sync -n   only show what would change
+# Not copied: models, logs, the RPC weight cache, and what each console writes for itself with
+# `llm-cluster ensure` (keepalived.conf, /etc/hosts, the link address). Running services keep the
+# old files until restarted: the list rsync prints shows what changed.
+set -e
+peer=$(/root/bin/llm-cluster get peer.link)
+dry=
+[ "$1" = "-n" ] && dry=--dry-run
+cd /
+rsync -aiR --delete $dry -e "ssh -o BatchMode=yes" --exclude __pycache__ \
+  root/bin root/llm/master opt/litellm etc/litellm var/lib/litellm etc/llm-cluster.yaml \
+  etc/systemd/system/llama-qwen.service etc/systemd/system/llama-qwen.service.d \
+  etc/systemd/system/llama-pool.service etc/systemd/system/llama-pool.service.d \
+  etc/systemd/system/ggml-rpc.service etc/systemd/system/ggml-rpc.service.d \
+  etc/systemd/system/llm-peer.service etc/systemd/system/litellm.service \
+  etc/sysctl.d/90-llm-memory.conf etc/sysctl.d/91-llm-net.conf etc/sysctl.d/92-llm-arp.conf \
+  etc/modules-load.d/bbr.conf \
+  "root@$peer:/"
+[ -n "$dry" ] && exit 0
+ssh -o BatchMode=yes "root@$peer" \
+  'systemctl daemon-reload && sysctl -q --system && /root/bin/llm-cluster ensure && echo "applied on $(hostname)"'

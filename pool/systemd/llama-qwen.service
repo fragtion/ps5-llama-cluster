@@ -1,0 +1,10 @@
+[Unit]
+Description=llama-server standalone (Qwen3.8-27B IQ3_XXS, text only)
+
+[Service]
+ExecStart=/root/bin/run-llama-standalone.sh
+WorkingDirectory=/root/llm/master
+Restart=on-failure
+RestartSec=15
+StandardOutput=append:/root/logs/llama-server.log
+StandardError=append:/root/logs/llama-server.log

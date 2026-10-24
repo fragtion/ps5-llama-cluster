@@ -1,0 +1,16 @@
+[Unit]
+Description=llama-server pooled over both PS5s (Qwen3.8-27B IQ3_S, coordinator)
+Conflicts=llama-qwen.service
+After=network-online.target
+Wants=network-online.target
+# A failed load resends ~6 GB to the worker; stop after 3 tries in 30 min.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+ExecStart=/root/bin/run-llama-pool.sh
+WorkingDirectory=/root/llm/master
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/root/logs/llama-pool.log
+StandardError=append:/root/logs/llama-pool.log

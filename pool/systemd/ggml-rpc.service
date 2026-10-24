@@ -1,0 +1,17 @@
+[Unit]
+Description=ggml-rpc-server (Vulkan) lending this PS5's GPU to the coordinator PS5
+Conflicts=llama-qwen.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/root/bin/run-rpc-server.sh
+WorkingDirectory=/root/llm/master
+Restart=on-failure
+RestartSec=15
+# RPC has no authentication: only the coordinator may connect. Put its address (COORDINATOR in
+# /etc/default/llm-pool) here.
+IPAddressDeny=any
+IPAddressAllow=192.168.1.50 localhost
+StandardOutput=append:/root/logs/ggml-rpc.log
+StandardError=append:/root/logs/ggml-rpc.log

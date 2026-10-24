@@ -1,0 +1,5 @@
+# /etc/default/llm-pool: the two consoles' addresses, the same file on both.
+# run-llama-pool.sh (coordinator) connects to WORKER; run-rpc-server.sh (worker) listens on WORKER.
+# Also put COORDINATOR in ggml-rpc.service's IPAddressAllow= line.
+COORDINATOR=192.168.1.50
+WORKER=192.168.1.51

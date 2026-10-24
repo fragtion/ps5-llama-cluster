@@ -1,0 +1,13 @@
+#!/bin/sh
+# Switch how this PS5 runs llama.cpp. The three units conflict, so starting one stops the others.
+#   pool        coordinator: the 27B IQ3_S + vision over both consoles (start the worker first)
+#   worker      worker: lend this GPU to the coordinator
+#   standalone  either console alone: the 27B IQ3_XXS, text only
+case "$1" in
+  pool)       systemctl start llama-pool.service ;;
+  worker)     systemctl start ggml-rpc.service ;;
+  standalone) systemctl start llama-qwen.service ;;
+  off)        systemctl stop llama-pool.service ggml-rpc.service llama-qwen.service ;;
+  status|"")  for u in llama-pool ggml-rpc llama-qwen; do printf '%-12s %s\n' "$u" "$(systemctl is-active $u.service)"; done ;;
+  *) echo "usage: llm-mode pool|worker|standalone|off|status"; exit 2 ;;
+esac

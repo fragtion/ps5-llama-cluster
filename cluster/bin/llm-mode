@@ -1,0 +1,18 @@
+#!/bin/sh
+# Choose how this PS5 runs llama.cpp. "auto" (the boot default) lets llm-peer.service pool with the
+# other PS5 while it is up and run standalone otherwise; any other mode stops it and takes manual control.
+# The pooled mode is "pool" on the coordinator and "worker" on the worker (/etc/llm-cluster.yaml).
+if [ "$(/root/bin/llm-cluster get self.role)" = coordinator ]; then
+  pooled=pool; unit=llama-pool
+else
+  pooled=worker; unit=ggml-rpc
+fi
+case "$1" in
+  auto)       systemctl start llm-peer.service ;;
+  standalone) systemctl stop llm-peer.service; systemctl start llama-qwen.service ;;
+  "$pooled")  systemctl stop llm-peer.service; systemctl start $unit.service ;;
+  off)        systemctl stop llm-peer.service $unit.service llama-qwen.service ;;
+  status|"")  for u in llm-peer llama-qwen $unit litellm keepalived; do printf '%-12s %s\n' "$u" "$(systemctl is-active $u.service)"; done
+              wget -qO- -T 3 http://127.0.0.1:50060/status; echo ;;
+  *) echo "usage: llm-mode auto|standalone|$pooled|off|status"; exit 2 ;;
+esac

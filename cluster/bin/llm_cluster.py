@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""This node's view of /etc/llm-cluster.yaml, for the PS5 scripts.
+
+  llm-cluster get <key>   print a value. "self." and "peer." name this node and the other one,
+                          e.g. self.role, peer.link, link.interface, gateway.vip
+  llm-cluster ensure      apply this node's part of the file: the link address (NetworkManager
+                          profile and live), /etc/hosts, the RPC server's firewall, keepalived.conf
+"""
+import ipaddress
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+PATH = "/etc/llm-cluster.yaml"
+RPC_DROPIN = Path("/etc/systemd/system/ggml-rpc.service.d/link.conf")
+KEEPALIVED = Path("/etc/keepalived/keepalived.conf")
+HOSTS = Path("/etc/hosts")
+
+
+def load():
+    with open(PATH) as f:
+        cfg = yaml.safe_load(f)
+    me = socket.gethostname()
+    if me not in cfg["nodes"]:
+        sys.exit(f"{me} is not a node in {PATH}")
+    peer = next(n for n in cfg["nodes"] if n != me)
+    cfg["self"] = dict(cfg["nodes"][me], name=me)
+    cfg["peer"] = dict(cfg["nodes"][peer], name=peer)
+    return cfg
+
+
+def get(cfg, key):
+    value = cfg
+    for part in key.split("."):
+        value = value[part]
+    return value
+
+
+def coordinator(cfg):
+    return next(n for n in cfg["nodes"].values() if n["role"] == "coordinator")
+
+
+def run(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+
+
+def write_if_changed(path, text):
+    if path.exists() and path.read_text() == text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return True
+
+
+def ensure_link(cfg):
+    iface = cfg["link"]["interface"]
+    cidr = f"{cfg['self']['link']}/{ipaddress.ip_network(cfg['link']['subnet']).prefixlen}"
+    conn = run("nmcli", "-g", "GENERAL.CONNECTION", "device", "show", iface)
+    # in the profile, so NetworkManager keeps it across reconnects (DHCP still provides the LAN address)
+    if conn and run("nmcli", "-g", "ipv4.addresses", "connection", "show", conn) != cidr:
+        run("nmcli", "connection", "modify", conn, "ipv4.addresses", cidr)
+    if cidr not in run("ip", "-4", "-o", "addr", "show", "dev", iface):
+        run("ip", "addr", "replace", cidr, "dev", iface)
+
+
+def ensure_hosts(cfg):
+    # the node names resolve to their link addresses (ssh ps5b, llm-sync); 127.0.1.1 stays as is
+    lines = [l for l in HOSTS.read_text().splitlines()
+             if l.startswith("127.") or not set(l.split()[1:]) & set(cfg["nodes"])]
+    at = next((i + 1 for i, l in enumerate(lines) if l.startswith("127.0.1.1")), len(lines))
+    lines[at:at] = [f"{n['link']}\t{name}" for name, n in cfg["nodes"].items()]
+    write_if_changed(HOSTS, "\n".join(lines) + "\n")
+
+
+def ensure_rpc_firewall(cfg):
+    text = ("# Written by `llm-cluster ensure` from /etc/llm-cluster.yaml; edit the YAML instead.\n"
+            "# RPC has no authentication: only the coordinator may connect.\n"
+            "[Service]\n"
+            "IPAddressAllow=\n"
+            "IPAddressDeny=any\n"
+            f"IPAddressAllow={coordinator(cfg)['link']} localhost\n")
+    if write_if_changed(RPC_DROPIN, text):
+        run("systemctl", "daemon-reload")
+
+
+def ensure_keepalived(cfg):
+    gw = cfg["gateway"]
+    text = f"""# Written by `llm-cluster ensure` from /etc/llm-cluster.yaml; edit the YAML instead.
+# One console holds the gateway address {gw['vip']}; gateway-notify.sh runs LiteLLM on that one.
+global_defs {{
+    router_id {cfg['self']['name']}
+    enable_script_security
+    script_user root
+}}
+
+vrrp_instance gateway {{
+    state BACKUP
+    nopreempt                  # whoever holds the address keeps it; no needless LiteLLM restarts
+    interface {gw['interface']}
+    virtual_router_id {gw['vrid']}
+    priority {150 if cfg['self']['role'] == 'coordinator' else 100}
+    advert_int 1
+    unicast_src_ip {cfg['self']['link']}
+    unicast_peer {{
+        {cfg['peer']['link']}
+    }}
+    virtual_ipaddress {{
+        {gw['vip']} dev {gw['interface']}
+    }}
+    notify /root/bin/gateway-notify.sh
+}}
+"""
+    if write_if_changed(KEEPALIVED, text) and run("systemctl", "is-active", "keepalived") == "active":
+        run("systemctl", "reload", "keepalived")
+
+
+def ensure(cfg):
+    ensure_link(cfg)
+    ensure_hosts(cfg)
+    ensure_rpc_firewall(cfg)
+    ensure_keepalived(cfg)
+
+
+def main(argv):
+    cfg = load()
+    if len(argv) == 3 and argv[1] == "get":
+        print(get(cfg, argv[2]))
+    elif len(argv) == 2 and argv[1] == "ensure":
+        ensure(cfg)
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
