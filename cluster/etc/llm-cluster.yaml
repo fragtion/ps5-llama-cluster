@@ -21,3 +21,12 @@ gateway:
   interface: enp64s0f2
   vrid: 90
   port: 4000          # where litellm.service listens (informational)
+
+models:
+  # true: keep /root/models the same on both consoles (two-way, with the rest of llm-config-sync),
+  # so either console has every model. This REPLACES the worker's RPC weight cache, the two are
+  # mutually exclusive: `llm-cluster ensure` DELETES /root/.cache/llama.cpp/rpc on both consoles to
+  # make room, and ggml-rpc runs without a cache (a LLAMACACHE drive is ignored, not erased). Every
+  # pool start then receives the worker's share over the link, which takes longer; inference is
+  # the same. Each console's drive needs room for every model.
+  sync: false

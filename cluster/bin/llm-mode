@@ -13,6 +13,7 @@ case "$1" in
   "$pooled")  systemctl stop llm-peer.service; systemctl start $unit.service ;;
   off)        systemctl stop llm-peer.service $unit.service llama-qwen.service ;;
   status|"")  for u in llm-peer llama-qwen $unit litellm keepalived; do printf '%-12s %s\n' "$u" "$(systemctl is-active $u.service)"; done
+              echo "model sync: $([ "$(/root/bin/llm-cluster get models.sync false)" = true ] && echo on || echo off) (models.sync in /etc/llm-cluster.yaml)"
               if [ $pooled = worker ]; then cat /run/llm-cache-choice 2>/dev/null || echo "weight cache: decided when ggml-rpc starts"
               elif mountpoint -q /mnt/llamacache; then echo "weight cache: LLAMACACHE is mounted here but unused: it only helps on the worker"; fi
               wget -qO- -T 3 http://127.0.0.1:50060/status; echo ;;

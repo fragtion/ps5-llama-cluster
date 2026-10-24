@@ -1,30 +1,66 @@
 #!/bin/sh
 # Two-way sync of the shared files with the other console: /etc/litellm, /etc/llm-cluster.yaml and
-# /root/sync (put anything there you want on both). llm-config-watch runs this after every change,
-# and llm-config-sync.timer catches up after the other console was away. Everything else stays with
-# `llm-sync` (manual).
+# /root/sync (put anything there you want on both), plus /root/models when models.sync is on in the
+# YAML. llm-config-watch runs this after every change, and llm-config-sync.timer catches up after
+# the other console was away. Everything else stays with `llm-sync` (manual).
 # Unison keeps a record of the last sync on both consoles, so a deletion on either side reaches the
 # other one, and a console that was off receives what changed meanwhile instead of undoing it. A
 # file changed on both sides goes to the newer copy.
 # The copy that lands on the other console starts its watcher there, which applies it
 # (`llm-cluster ensure`) and finds nothing left to send back.
+# /root/models takes minutes, so it runs apart (`llm-config-sync --models`, llm-models-sync.service)
+# and only ever on the coordinator: both consoles hashing the same GGUFs at once would only thrash
+# the disks. Either console's change starts that unit there and returns.
 export HOME=/root   # unison keeps its record in ~/.unison; systemd sets no HOME
+peer=$(/root/bin/llm-cluster get peer.link)
+
+# unison_sync <dir> [unison options]: <dir> on both consoles. Unison keeps one record (and one lock)
+# per pair of roots, so the models (their own roots) never hold up the config sync.
+unison_sync() {
+  dir=$1; shift
+  for try in 1 2 3; do
+    out=$(nice -n 10 ionice -c3 unison "$dir" "ssh://root@$peer/$dir" "$@" \
+      -batch -auto -prefer newer -times -terse -ui text -logfile /dev/null \
+      -ignore 'Name {__pycache__,.*.sw?,*~,4913}' \
+      -sshargs '-o BatchMode=yes -o ConnectTimeout=5' 2>&1)
+    rc=$?
+    case $out in *ocked*) sleep 5 ;; *) break ;; esac   # the other console is syncing right now
+  done
+  stamp=$(date '+%F %T')
+  echo "$out" | grep -E '^\[END\]|rror|ailed|onflict|skipped' | sed "s/^/$stamp /"
+  [ $rc -le 1 ] || echo "$stamp unison exit $rc against $peer; the timer retries"
+}
+
+if [ "$1" = --models ]; then
+  [ "$(/root/bin/llm-cluster get models.sync false)" = true ] || exit 0
+  # Let the peer apply the YAML first: with models.sync on, that deletes its RPC weight cache to
+  # make room for the models.
+  # A run that was stopped leaves its partial copy behind (.unison.<name>.<hash>.unison.tmp), and the
+  # next run starts another beside it: clear them first, or one big model can fill the drive.
+  ssh -n -o BatchMode=yes -o ConnectTimeout=5 "root@$peer" '/root/bin/llm-cluster ensure; mkdir -p /root/models
+    find /root/models -maxdepth 1 -name ".unison.*.unison.tmp" -delete'
+  mkdir -p /root/models
+  find /root/models -maxdepth 1 -name '.unison.*.unison.tmp' -delete
+  unison_sync /root/models
+  exit 0
+fi
+
+exec 9>/run/llm-config-sync.lock
+flock 9   # the watcher and the timer take turns on this console
 mkdir -p /root/sync
 # Unison refuses to sync a path that was emptied completely on one side (a guard worth keeping for
 # /etc/litellm), so this file keeps /root/sync from ever being empty.
 [ -e /root/sync/README ] || printf '%s\n' 'Anything in /root/sync is kept the same on both PS5s (llm-config-sync):' \
   'changes and deletions on either one reach the other within seconds.' > /root/sync/README
 /root/bin/llm-cluster ensure
-peer=$(/root/bin/llm-cluster get peer.link)
-for try in 1 2 3; do
-  out=$(unison / "ssh://root@$peer//" -path etc/litellm -path etc/llm-cluster.yaml -path root/sync \
-    -batch -auto -prefer newer -times -terse -ui text -logfile /dev/null \
-    -ignore 'Name {__pycache__,.*.sw?,*~,4913}' \
-    -sshargs '-o BatchMode=yes -o ConnectTimeout=5' 2>&1)
-  rc=$?
-  case $out in *ocked*) sleep 5 ;; *) break ;; esac   # the other console is syncing right now
-done
-stamp=$(date '+%F %T')
-echo "$out" | grep -E '^\[END\]|rror|ailed|onflict|skipped' | sed "s/^/$stamp /"
-[ $rc -le 1 ] || echo "$stamp unison exit $rc against $peer; the timer retries"
+unison_sync / -path etc/litellm -path etc/llm-cluster.yaml -path root/sync
+if [ "$(/root/bin/llm-cluster get models.sync false)" = true ]; then
+  # --no-block: a run already going is not started twice; a change it missed is picked up by the
+  # next change or the timer
+  if [ "$(/root/bin/llm-cluster get self.role)" = coordinator ]; then
+    systemctl start --no-block llm-models-sync.service
+  else
+    ssh -n -o BatchMode=yes -o ConnectTimeout=5 "root@$peer" systemctl start --no-block llm-models-sync.service
+  fi
+fi
 exit 0

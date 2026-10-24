@@ -1,0 +1,8 @@
+[Unit]
+Description=Sync /root/models with the other PS5 (models.sync in /etc/llm-cluster.yaml; coordinator only)
+
+[Service]
+Type=oneshot
+ExecStart=/root/bin/llm-config-sync --models
+StandardOutput=append:/root/logs/llm-config-sync.log
+StandardError=append:/root/logs/llm-config-sync.log

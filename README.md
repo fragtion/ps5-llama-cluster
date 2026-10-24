@@ -461,7 +461,8 @@ are the same hardware, so a build made on one runs on the other.
 
 **What syncs by itself, both ways** ([`cluster/bin/llm-config-sync`](cluster/bin/llm-config-sync)):
 - **The paths:** the gateway config (`/etc/litellm`), `/etc/llm-cluster.yaml`, and `/root/sync`,
-  a shared folder for your own scripts and files (subfolders included).
+  a shared folder for your own scripts and files (subfolders included). With `models.sync` on,
+  also `/root/models` ([see below](#optional-the-same-models-on-both-consoles)).
 - **How:** `llm-config-watch` (inotify) sees a change on either console and runs
   [unison](https://github.com/bcpierce00/unison) 2 s after the last write. The other console has
   the change within ~3 s. A YAML change that arrives is applied there with `llm-cluster ensure`.
@@ -476,6 +477,26 @@ are the same hardware, so a build made on one runs on the other.
 - **Applying it.** LiteLLM reads its config at start: run `systemctl restart litellm` on the
   console that holds the VIP. The log is `/root/logs/llm-config-sync.log`.
 
+### Optional: the same models on both consoles
+
+Set `models.sync: true` in `/etc/llm-cluster.yaml` (on either console; it syncs itself) to keep
+`/root/models` identical on both, two-way, with the same watcher and timer as the config. Either
+console then has every model, which a future role swap or "two standalone servers" mode needs.
+- **How:** a change on either console starts `llm-models-sync.service` on the coordinator (it
+  needn't be enabled). That keeps it to one run at a time, so the two consoles never hash the same
+  GGUFs at once, and the minutes a model copy takes don't hold up the config sync.
+- **It replaces the RPC weight cache; the two are mutually exclusive.** The worker can't load its
+  share from its own GGUF (llama.cpp's RPC server has no such option), so a model copy doesn't
+  make pool starts faster. To make room, `llm-cluster ensure` **deletes**
+  `/root/.cache/llama.cpp/rpc` on both consoles, and `ggml-rpc` runs without a cache (a
+  `LLAMACACHE` drive is ignored, not erased).
+- **The cost:** every pool start receives the worker's share over the link again: slower starts,
+  and more traffic over the PS5's weak NIC at those moments. Inference is unchanged.
+- **Space:** each drive needs room for every model (~23.5 GB for the two here). The first sync
+  copies whatever the other console is missing, which takes a few minutes over the link.
+- Set it back to `false` to stop syncing. Nothing is deleted then; the cache comes back on the
+  next pool starts.
+
 ### Optional: a cache drive
 
 The worker's RPC weight cache can live on a separate drive, freeing its system drive. Format any
@@ -483,8 +504,8 @@ USB drive or SD card as ext4 with the label `LLAMACACHE` (`mkfs.ext4 -L LLAMACAC
 and plug it into the **worker**. The cache is only read when the pool starts, so this only changes
 how long a pool start takes; it never touches inference.
 - **Each start of `ggml-rpc` chooses** ([`run-rpc-server.sh`](cluster/bin/run-rpc-server.sh)):
-  the `LLAMACACHE` drive if it's on a USB 3 link, else `/root/.cache/llama.cpp/rpc` if that folder
-  exists, else no cache. `llm-mode status` shows the choice.
+  no cache if `models.sync` is on, else the `LLAMACACHE` drive if it's on a USB 3 link, else
+  `/root/.cache/llama.cpp/rpc`. `llm-mode status` shows the choice.
 - **USB 3 only.** A USB 2 link (~20–40 MB/s) is slower than the coordinator sending the weights
   over gigabit, so a drive there is skipped. A network share (NAS, PC) doesn't help either: it
   reaches the worker through the same ethernet port.
@@ -615,13 +636,13 @@ cluster/                      Part 2: the self-managing cluster
   bin/llm-peerd.py              the peer daemon
   bin/llm-mode                  replaces Part 1's (auto mode, role from the YAML)
   bin/llm-sync                  rsync push to the other console
-  bin/llm-config-sync           two-way sync (unison) of /etc/litellm, the YAML and /root/sync
+  bin/llm-config-sync           two-way sync (unison) of /etc/litellm, the YAML and /root/sync (+ /root/models)
   bin/llm-config-watch          runs it on every change (inotify)
   bin/gateway-notify.sh         keepalived hook: LiteLLM follows the VIP
   bin/run-llama-pool.sh         Part 1's, with the worker's link address
   bin/run-rpc-server.sh         Part 1's, bound to the link address, picks the cache location
   src/rpc-cache-check.c         verifies the RPC weight cache
-  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer), rpc-cache-check (+ .timer)
+  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer), llm-models-sync, rpc-cache-check (+ .timer)
   litellm/                      config.yaml, vision_router.py, litellm.service, env.example
 ```
 

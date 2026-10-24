@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """This node's view of /etc/llm-cluster.yaml, for the PS5 scripts.
 
-  llm-cluster get <key>   print a value. "self." and "peer." name this node and the other one,
-                          e.g. self.role, peer.link, link.interface, gateway.vip
+  llm-cluster get <key> [default]
+                          print a value. "self." and "peer." name this node and the other one,
+                          e.g. self.role, peer.link, link.interface, gateway.vip, models.sync
   llm-cluster ensure      apply this node's part of the file: the link address (NetworkManager
-                          profile and live), /etc/hosts, the RPC server's firewall, keepalived.conf
+                          profile and live), /etc/hosts, the RPC server's firewall, keepalived.conf,
+                          and with models.sync on, removing the RPC weight cache
 """
 import ipaddress
+import shutil
 import socket
 import subprocess
 import sys
@@ -18,6 +21,7 @@ PATH = "/etc/llm-cluster.yaml"
 RPC_DROPIN = Path("/etc/systemd/system/ggml-rpc.service.d/link.conf")
 KEEPALIVED = Path("/etc/keepalived/keepalived.conf")
 HOSTS = Path("/etc/hosts")
+RPC_CACHE = Path("/root/.cache/llama.cpp/rpc")
 
 
 def load():
@@ -32,11 +36,15 @@ def load():
     return cfg
 
 
-def get(cfg, key):
+def get(cfg, key, default=None):
     value = cfg
     for part in key.split("."):
+        if not isinstance(value, dict) or part not in value:
+            if default is None:
+                sys.exit(f"{key} is not set in {PATH}")
+            return default
         value = value[part]
-    return value
+    return str(value).lower() if isinstance(value, bool) else value
 
 
 def coordinator(cfg):
@@ -117,17 +125,26 @@ vrrp_instance gateway {{
         run("systemctl", "reload", "keepalived")
 
 
+def ensure_model_sync(cfg):
+    # models.sync replaces the RPC weight cache: free its space before the models arrive
+    if get(cfg, "models.sync", "false") == "true" and RPC_CACHE.exists():
+        size = sum(f.stat().st_size for f in RPC_CACHE.iterdir()) / 1e9
+        shutil.rmtree(RPC_CACHE)
+        print(f"models.sync is on: deleted the RPC weight cache {RPC_CACHE} ({size:.1f} GB)")
+
+
 def ensure(cfg):
     ensure_link(cfg)
     ensure_hosts(cfg)
     ensure_rpc_firewall(cfg)
     ensure_keepalived(cfg)
+    ensure_model_sync(cfg)
 
 
 def main(argv):
     cfg = load()
-    if len(argv) == 3 and argv[1] == "get":
-        print(get(cfg, argv[2]))
+    if len(argv) in (3, 4) and argv[1] == "get":
+        print(get(cfg, *argv[2:]))
     elif len(argv) == 2 and argv[1] == "ensure":
         ensure(cfg)
     else:

@@ -3,11 +3,12 @@
 # (/etc/llm-cluster.yaml; ggml-rpc.service.d/link.conf lets only the coordinator connect).
 # Weight cache, so later pool starts read the received weights from a local drive instead of the
 # network. Checked at every start, first match wins:
-#   1. a drive labelled LLAMACACHE (mounted at /mnt/llamacache) on a USB 3 link: move it to
+#   1. models.sync on in /etc/llm-cluster.yaml: no cache, the two are mutually exclusive (the
+#      coordinator sends the weights over the link)
+#   2. a drive labelled LLAMACACHE (mounted at /mnt/llamacache) on a USB 3 link: move it to
 #      whichever console is the worker; the coordinator never uses it. On USB 2 (~20-40 MB/s) it
 #      is slower than the network, so it is skipped.
-#   2. /root/.cache/llama.cpp/rpc on this console's own drive, if that folder exists
-#   3. no cache: the coordinator sends the weights over the link
+#   3. /root/.cache/llama.cpp/rpc on this console's own drive
 # The choice is written to /run/llm-cache-choice for `llm-mode status`.
 cd /root/llm/master
 LD_LIBRARY_PATH=/root/llm/master/build/bin
@@ -20,16 +21,16 @@ if mountpoint -q /mnt/llamacache; then
   [ -f "$p/speed" ] && speed=$(cat "$p/speed")
 fi
 cache=-c
-if [ "${speed%%.*}" -ge 5000 ]; then
+if [ "$(/root/bin/llm-cluster get models.sync false)" = true ]; then
+  cache=
+  choice="none: models.sync is on in /etc/llm-cluster.yaml (the weights come over the link)"
+elif [ "${speed%%.*}" -ge 5000 ]; then
   LLAMA_CACHE=/mnt/llamacache   # the server adds /rpc
   export LLAMA_CACHE
   choice="LLAMACACHE drive (/mnt/llamacache/rpc, ${speed} Mbit/s USB)"
-elif [ -d /root/.cache/llama.cpp/rpc ]; then
-  choice="/root/.cache/llama.cpp/rpc"
 else
-  cache=
-  choice="none (the weights come over the link)"
+  choice="/root/.cache/llama.cpp/rpc"
 fi
-mountpoint -q /mnt/llamacache && [ -z "$LLAMA_CACHE" ] && choice="$choice; LLAMACACHE skipped: ${speed} Mbit/s USB is slower than the network"
+[ -n "$cache" ] && mountpoint -q /mnt/llamacache && [ -z "$LLAMA_CACHE" ] && choice="$choice; LLAMACACHE skipped: ${speed} Mbit/s USB is slower than the network"
 echo "weight cache: $choice" | tee /run/llm-cache-choice
 exec ./build/bin/ggml-rpc-server -H "$(/root/bin/llm-cluster get self.link)" -p 50052 $cache
