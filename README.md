@@ -384,8 +384,8 @@ What `llm-cluster ensure` writes:
   The daemon re-adds it if it disappears.
 - **`/etc/hosts`**: `ps5a` and `ps5b` resolve to the link addresses.
 - **`ggml-rpc.service.d/link.conf`**: only the coordinator may connect to the RPC port.
-- **`/etc/keepalived/keepalived.conf`**: unicast VRRP over the link. The coordinator gets
-  priority 150, the worker 100.
+- **`/etc/keepalived/keepalived.conf`**: unicast VRRP over the link. The worker gets
+  priority 150, the coordinator 100 (see below).
 
 `llm-cluster get self.role` (or `peer.link`, `gateway.vip`, …) prints a value for scripts.
 
@@ -418,6 +418,16 @@ systemctl daemon-reload
   ([`gateway-notify.sh`](cluster/bin/gateway-notify.sh)) and stops it on the other.
 - **Memory cap.** The unit caps LiteLLM at 600 MB (it uses ~160–480 MB). Under memory pressure
   the kernel kills it before llama-server.
+
+> [!NOTE]
+> **Why the gateway prefers the worker (ps5b).** Either console can run the gateway, but while
+> pooled, the coordinator's host RAM is the tightest resource in the cluster: llama-server keeps
+> its context checkpoints there, among other things. We measured only ~290 MB free on it after a
+> 77K-token prompt. The worker only lends its GPU and has more room
+> (~830 MB available with LiteLLM running). keepalived therefore gives the worker the higher
+> priority, so the worker takes the VIP when both consoles start together. With `nopreempt`, a
+> console that already holds the VIP keeps it. If the coordinator ends up with it after a
+> failover, it keeps it until it next stops; that's fine, just less roomy.
 
 ### 4. Mirror and start
 

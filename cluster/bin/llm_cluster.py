@@ -101,7 +101,7 @@ vrrp_instance gateway {{
     nopreempt                  # whoever holds the address keeps it; no needless LiteLLM restarts
     interface {gw['interface']}
     virtual_router_id {gw['vrid']}
-    priority {150 if cfg['self']['role'] == 'coordinator' else 100}
+    priority {150 if cfg['self']['role'] == 'worker' else 100}   # higher on the worker: the coordinator's RAM is tighter
     advert_int 1
     unicast_src_ip {cfg['self']['link']}
     unicast_peer {{
