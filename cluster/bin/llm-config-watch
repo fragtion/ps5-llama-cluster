@@ -1,0 +1,14 @@
+#!/bin/bash
+# Watch the shared files (see llm-config-sync) and sync once a burst of changes has been quiet for
+# 2 s. Subfolders of /root/sync are watched too. Changes made during a sync are queued and trigger
+# one more run.
+mkdir -p /root/sync
+/root/bin/llm-config-sync   # catch up first: either console may have changed while this one was off
+{
+  inotifywait -m -q -e close_write,moved_to,moved_from,delete,attrib --include '/llm-cluster\.yaml$' /etc &
+  inotifywait -m -r -q -e close_write,create,moved_to,moved_from,delete,attrib /etc/litellm /root/sync &
+  wait
+} | while read -r _; do
+  while read -r -t 2 _; do :; done
+  /root/bin/llm-config-sync
+done

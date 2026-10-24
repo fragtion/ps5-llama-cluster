@@ -1,9 +1,0 @@
-[Unit]
-Description=Watch the gateway and cluster config for changes
-
-[Path]
-PathChanged=/etc/litellm
-PathChanged=/etc/llm-cluster.yaml
-
-[Install]
-WantedBy=multi-user.target

@@ -352,7 +352,7 @@ Part 1 needs you at a shell. Part 2 adds:
 | **LiteLLM gateway** | One OpenAI-compatible endpoint. `ps5` routes to whichever console serves. Images go to the pool when it's up, otherwise to a vision fallback. |
 | **keepalived** | A floating gateway address (the VIP) held by one console at a time. LiteLLM runs only on that console. |
 | **`llm-sync`** | Pushes the software and config from the console you changed to the other one over the link (rsync). |
-| **`llm-config-sync`** | Pushes `/etc/litellm` and the cluster YAML to the other console by itself, seconds after you save them (systemd path unit, plus a timer that catches up). |
+| **`llm-config-sync`** | Keeps `/etc/litellm`, the cluster YAML and a shared `/root/sync` folder the same on both consoles, both ways and deletions included, seconds after a change (unison, an inotify watcher, and a timer that catches up). |
 
 ### Behaviour
 
@@ -369,7 +369,7 @@ Part 1 needs you at a shell. Part 2 adds:
 Do Part 0 and Part 1 first; Part 2 reuses the same build, models and units.
 
 ```bash
-apt install -y rsync keepalived python3-yaml python3-venv
+apt install -y rsync unison inotify-tools keepalived python3-yaml python3-venv
 hostnamectl set-hostname ps5a            # ps5b on the other one: must match the YAML
 
 cp cluster/bin/* /root/bin/ && chmod +x /root/bin/*      # replaces llm-mode and two run scripts
@@ -440,7 +440,7 @@ llm-sync            # copies, then runs daemon-reload, sysctl and `llm-cluster e
 systemctl disable --now llama-pool ggml-rpc llama-qwen 2>/dev/null   # the daemon starts these now
 systemctl enable --now llm-peer
 systemctl enable --now keepalived
-systemctl enable --now llm-config-sync.path llm-config-sync.timer
+systemctl enable --now llm-config-watch llm-config-sync.timer
 ```
 
 Point your clients at `http://<vip>:4000/v1`, with the master key as their API key, and model
@@ -458,15 +458,20 @@ It runs with `--delete`. It doesn't copy models, logs, the RPC weight cache, or 
 console writes for itself. Running services keep the old files until restarted. Both consoles
 are the same hardware, so a build made on one runs on the other.
 
-**What syncs by itself** ([`cluster/bin/llm-config-sync`](cluster/bin/llm-config-sync)): the
-gateway config (`/etc/litellm`) and `/etc/llm-cluster.yaml`, the files you're likely to edit.
-`llm-config-sync.path` watches them and pushes a change to the other console 2–3 s after you save,
-on either console. The copy that arrives runs `llm-cluster ensure` there and isn't sent back.
-- **Newer wins, nothing is deleted.** It uses rsync `--update` without `--delete`, so a console
-  that was off can't overwrite newer edits with its old copies. To delete a file, delete it on
-  both consoles (or run `llm-sync`).
-- **Catch-up.** If the other console was off, `llm-config-sync.timer` retries 5 min after boot and
-  every 15 min after that.
+**What syncs by itself, both ways** ([`cluster/bin/llm-config-sync`](cluster/bin/llm-config-sync)):
+- **The paths:** the gateway config (`/etc/litellm`), `/etc/llm-cluster.yaml`, and `/root/sync`,
+  a shared folder for your own scripts and files (subfolders included).
+- **How:** `llm-config-watch` (inotify) sees a change on either console and runs
+  [unison](https://github.com/bcpierce00/unison) 2 s after the last write. The other console has
+  the change within ~3 s. A YAML change that arrives is applied there with `llm-cluster ensure`.
+- **Deletions sync too.** Unison keeps a record of the last sync on both consoles, so it can tell
+  a deleted file from a new one. A console that was off receives what changed meanwhile instead
+  of undoing it. A file changed on both sides goes to the newer copy.
+- **Catch-up.** The watcher syncs once when it starts, and `llm-config-sync.timer` retries 5 min
+  after boot and every 15 min after that.
+- **One guard:** unison refuses to sync a path that was emptied completely on one side, which
+  protects `/etc/litellm`. A `README` that the script recreates keeps `/root/sync` from being
+  empty, so deleting everything else there still syncs.
 - **Applying it.** LiteLLM reads its config at start: run `systemctl restart litellm` on the
   console that holds the VIP. The log is `/root/logs/llm-config-sync.log`.
 
@@ -479,6 +484,7 @@ llm-mode auto                   # hand control back to the daemon
 tail -f /root/logs/llm-peer.log /root/logs/gateway.log
 nano /etc/litellm/config.yaml   # on either console: it reaches the other within seconds
 systemctl restart litellm       # on the console holding the VIP, to apply it
+cp my-script.sh /root/sync/     # on either console: it's on both within seconds
 ```
 
 ### Gateway models
@@ -579,11 +585,12 @@ cluster/                      Part 2: the self-managing cluster
   bin/llm-peerd.py              the peer daemon
   bin/llm-mode                  replaces Part 1's (auto mode, role from the YAML)
   bin/llm-sync                  rsync push to the other console
-  bin/llm-config-sync           automatic push of /etc/litellm and the YAML
+  bin/llm-config-sync           two-way sync (unison) of /etc/litellm, the YAML and /root/sync
+  bin/llm-config-watch          runs it on every change (inotify)
   bin/gateway-notify.sh         keepalived hook: LiteLLM follows the VIP
   bin/run-llama-pool.sh         Part 1's, with the worker's link address
   bin/run-rpc-server.sh         Part 1's, bound to the link address
-  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-sync (.path, .timer)
+  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer)
   litellm/                      config.yaml, vision_router.py, litellm.service, env.example
 ```
 

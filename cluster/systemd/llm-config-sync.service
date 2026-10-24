@@ -1,5 +1,5 @@
 [Unit]
-Description=Push /etc/litellm and /etc/llm-cluster.yaml to the other PS5
+Description=Sync /etc/litellm, the cluster YAML and /root/sync with the other PS5
 
 [Service]
 Type=oneshot

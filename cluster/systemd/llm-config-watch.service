@@ -1,0 +1,14 @@
+[Unit]
+Description=Sync /etc/litellm, the cluster YAML and /root/sync with the other PS5 on every change
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/root/bin/llm-config-watch
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/logs/llm-config-sync.log
+StandardError=append:/root/logs/llm-config-sync.log
+
+[Install]
+WantedBy=multi-user.target

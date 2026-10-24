@@ -1,19 +1,30 @@
 #!/bin/sh
-# Push the small, often-edited config to the other console: /etc/litellm and /etc/llm-cluster.yaml.
-# llm-config-sync.path starts this on every change, and llm-config-sync.timer catches up after the
-# other console was away. Everything else stays with `llm-sync` (manual).
-# Newer files win (--update) and nothing is deleted on the other console, so a console that was off
-# with older copies can't overwrite newer edits. To delete a file, delete it on both.
-# The copy that lands on the other console starts its own watcher, which applies it there
-# (`llm-cluster ensure`) and finds nothing newer to send back.
-sleep 2   # let an editor finish saving
+# Two-way sync of the shared files with the other console: /etc/litellm, /etc/llm-cluster.yaml and
+# /root/sync (put anything there you want on both). llm-config-watch runs this after every change,
+# and llm-config-sync.timer catches up after the other console was away. Everything else stays with
+# `llm-sync` (manual).
+# Unison keeps a record of the last sync on both consoles, so a deletion on either side reaches the
+# other one, and a console that was off receives what changed meanwhile instead of undoing it. A
+# file changed on both sides goes to the newer copy.
+# The copy that lands on the other console starts its watcher there, which applies it
+# (`llm-cluster ensure`) and finds nothing left to send back.
+export HOME=/root   # unison keeps its record in ~/.unison; systemd sets no HOME
+mkdir -p /root/sync
+# Unison refuses to sync a path that was emptied completely on one side (a guard worth keeping for
+# /etc/litellm), so this file keeps /root/sync from ever being empty.
+[ -e /root/sync/README ] || printf '%s\n' 'Anything in /root/sync is kept the same on both PS5s (llm-config-sync):' \
+  'changes and deletions on either one reach the other within seconds.' > /root/sync/README
 /root/bin/llm-cluster ensure
 peer=$(/root/bin/llm-cluster get peer.link)
-cd /
-out=$(rsync -aiR --update --exclude __pycache__ --exclude '.*.sw?' --exclude '*~' \
-  -e "ssh -o BatchMode=yes -o ConnectTimeout=5" etc/litellm etc/llm-cluster.yaml "root@$peer:/" 2>&1)
-rc=$?
+for try in 1 2 3; do
+  out=$(unison / "ssh://root@$peer//" -path etc/litellm -path etc/llm-cluster.yaml -path root/sync \
+    -batch -auto -prefer newer -times -terse -ui text -logfile /dev/null \
+    -ignore 'Name {__pycache__,.*.sw?,*~,4913}' \
+    -sshargs '-o BatchMode=yes -o ConnectTimeout=5' 2>&1)
+  rc=$?
+  case $out in *ocked*) sleep 5 ;; *) break ;; esac   # the other console is syncing right now
+done
 stamp=$(date '+%F %T')
-echo "$out" | grep -v '^\.d\.\.t' | grep . | sed "s/^/$stamp /"
-[ $rc -eq 0 ] || echo "$stamp could not reach $peer (rsync exit $rc); the timer retries"
+echo "$out" | grep -E '^\[END\]|rror|ailed|onflict|skipped' | sed "s/^/$stamp /"
+[ $rc -le 1 ] || echo "$stamp unison exit $rc against $peer; the timer retries"
 exit 0
