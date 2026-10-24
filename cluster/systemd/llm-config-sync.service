@@ -1,0 +1,8 @@
+[Unit]
+Description=Push /etc/litellm and /etc/llm-cluster.yaml to the other PS5
+
+[Service]
+Type=oneshot
+ExecStart=/root/bin/llm-config-sync
+StandardOutput=append:/root/logs/llm-config-sync.log
+StandardError=append:/root/logs/llm-config-sync.log

@@ -352,6 +352,7 @@ Part 1 needs you at a shell. Part 2 adds:
 | **LiteLLM gateway** | One OpenAI-compatible endpoint. `ps5` routes to whichever console serves. Images go to the pool when it's up, otherwise to a vision fallback. |
 | **keepalived** | A floating gateway address (the VIP) held by one console at a time. LiteLLM runs only on that console. |
 | **`llm-sync`** | Pushes the software and config from the console you changed to the other one over the link (rsync). |
+| **`llm-config-sync`** | Pushes `/etc/litellm` and the cluster YAML to the other console by itself, seconds after you save them (systemd path unit, plus a timer that catches up). |
 
 ### Behaviour
 
@@ -374,7 +375,7 @@ hostnamectl set-hostname ps5a            # ps5b on the other one: must match the
 cp cluster/bin/* /root/bin/ && chmod +x /root/bin/*      # replaces llm-mode and two run scripts
 ln -sfn llm_cluster.py /root/bin/llm-cluster
 cp cluster/etc/llm-cluster.yaml /etc/                    # edit: link subnet, VIP, interface
-cp cluster/systemd/*.service /etc/systemd/system/
+cp cluster/systemd/* /etc/systemd/system/                # .service, .path and .timer units
 systemctl daemon-reload
 llm-cluster ensure       # link address, /etc/hosts, RPC firewall drop-in, keepalived.conf
 ```
@@ -393,7 +394,7 @@ What `llm-cluster ensure` writes:
 > **If you change the link subnet**, also change the four `api_base` addresses in
 > `cluster/litellm/config.yaml`.
 
-### 2. SSH between the consoles (for `llm-sync`)
+### 2. SSH between the consoles (for `llm-sync` and `llm-config-sync`)
 
 ```bash
 ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519        # on both
@@ -439,6 +440,7 @@ llm-sync            # copies, then runs daemon-reload, sysctl and `llm-cluster e
 systemctl disable --now llama-pool ggml-rpc llama-qwen 2>/dev/null   # the daemon starts these now
 systemctl enable --now llm-peer
 systemctl enable --now keepalived
+systemctl enable --now llm-config-sync.path llm-config-sync.timer
 ```
 
 Point your clients at `http://<vip>:4000/v1`, with the master key as their API key, and model
@@ -456,6 +458,18 @@ It runs with `--delete`. It doesn't copy models, logs, the RPC weight cache, or 
 console writes for itself. Running services keep the old files until restarted. Both consoles
 are the same hardware, so a build made on one runs on the other.
 
+**What syncs by itself** ([`cluster/bin/llm-config-sync`](cluster/bin/llm-config-sync)): the
+gateway config (`/etc/litellm`) and `/etc/llm-cluster.yaml`, the files you're likely to edit.
+`llm-config-sync.path` watches them and pushes a change to the other console 2–3 s after you save,
+on either console. The copy that arrives runs `llm-cluster ensure` there and isn't sent back.
+- **Newer wins, nothing is deleted.** It uses rsync `--update` without `--delete`, so a console
+  that was off can't overwrite newer edits with its old copies. To delete a file, delete it on
+  both consoles (or run `llm-sync`).
+- **Catch-up.** If the other console was off, `llm-config-sync.timer` retries 5 min after boot and
+  every 15 min after that.
+- **Applying it.** LiteLLM reads its config at start: run `systemctl restart litellm` on the
+  console that holds the VIP. The log is `/root/logs/llm-config-sync.log`.
+
 ### Day to day
 
 ```bash
@@ -463,6 +477,8 @@ llm-mode status                 # units, LiteLLM, keepalived, and the daemon's v
 llm-mode standalone|pool|off    # manual control (pool is "worker" on ps5b); stops the daemon
 llm-mode auto                   # hand control back to the daemon
 tail -f /root/logs/llm-peer.log /root/logs/gateway.log
+nano /etc/litellm/config.yaml   # on either console: it reaches the other within seconds
+systemctl restart litellm       # on the console holding the VIP, to apply it
 ```
 
 ### Gateway models
@@ -563,10 +579,11 @@ cluster/                      Part 2: the self-managing cluster
   bin/llm-peerd.py              the peer daemon
   bin/llm-mode                  replaces Part 1's (auto mode, role from the YAML)
   bin/llm-sync                  rsync push to the other console
+  bin/llm-config-sync           automatic push of /etc/litellm and the YAML
   bin/gateway-notify.sh         keepalived hook: LiteLLM follows the VIP
   bin/run-llama-pool.sh         Part 1's, with the worker's link address
   bin/run-rpc-server.sh         Part 1's, bound to the link address
-  systemd/                      llm-peer, ggml-rpc (firewall via drop-in)
+  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-sync (.path, .timer)
   litellm/                      config.yaml, vision_router.py, litellm.service, env.example
 ```
 

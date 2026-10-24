@@ -3,6 +3,7 @@
 # one can run the whole stack. Run it on the console you changed.
 #   llm-sync      copy, then apply on the peer: daemon-reload, sysctl, `llm-cluster ensure`
 #   llm-sync -n   only show what would change
+# /etc/litellm and /etc/llm-cluster.yaml also sync by themselves on every change (llm-config-sync).
 # Not copied: models, logs, the RPC weight cache, and what each console writes for itself with
 # `llm-cluster ensure` (keepalived.conf, /etc/hosts, the link address). Running services keep the
 # old files until restarted: the list rsync prints shows what changed.
@@ -17,6 +18,8 @@ rsync -aiR --delete $dry -e "ssh -o BatchMode=yes" --exclude __pycache__ \
   etc/systemd/system/llama-pool.service etc/systemd/system/llama-pool.service.d \
   etc/systemd/system/ggml-rpc.service etc/systemd/system/ggml-rpc.service.d \
   etc/systemd/system/llm-peer.service etc/systemd/system/litellm.service \
+  etc/systemd/system/llm-config-sync.service etc/systemd/system/llm-config-sync.path \
+  etc/systemd/system/llm-config-sync.timer \
   etc/sysctl.d/90-llm-memory.conf etc/sysctl.d/91-llm-net.conf etc/sysctl.d/92-llm-arp.conf \
   etc/modules-load.d/bbr.conf \
   "root@$peer:/"
