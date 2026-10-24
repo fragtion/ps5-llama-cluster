@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify the llama.cpp RPC weight cache and delete damaged files
+
+[Service]
+Type=oneshot
+ExecStart=/root/bin/rpc-cache-check /mnt/llamacache/rpc /root/.cache/llama.cpp/rpc
+SuccessExitStatus=1
+Nice=19
+IOSchedulingClass=idle
+StandardOutput=append:/root/logs/rpc-cache-check.log
+StandardError=append:/root/logs/rpc-cache-check.log

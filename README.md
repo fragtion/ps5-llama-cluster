@@ -374,7 +374,10 @@ hostnamectl set-hostname ps5a            # ps5b on the other one: must match the
 cp cluster/bin/* /root/bin/ && chmod +x /root/bin/*      # replaces llm-mode and two run scripts
 ln -sfn llm_cluster.py /root/bin/llm-cluster
 cp cluster/etc/llm-cluster.yaml /etc/                    # edit: link subnet, VIP, interface
-cp cluster/systemd/* /etc/systemd/system/                # .service, .path and .timer units
+cp cluster/systemd/* /etc/systemd/system/                # .service and .timer units
+gcc -O2 -o /root/bin/rpc-cache-check cluster/src/rpc-cache-check.c
+mkdir -p /mnt/llamacache                                 # optional cache drive (see below)
+echo 'LABEL=LLAMACACHE /mnt/llamacache ext4 noatime,nofail,x-systemd.device-timeout=5s 0 2' >> /etc/fstab
 systemctl daemon-reload
 llm-cluster ensure       # link address, /etc/hosts, RPC firewall drop-in, keepalived.conf
 ```
@@ -438,7 +441,7 @@ llm-sync            # copies, then runs daemon-reload, sysctl and `llm-cluster e
 systemctl disable --now llama-pool ggml-rpc llama-qwen 2>/dev/null   # the daemon starts these now
 systemctl enable --now llm-peer
 systemctl enable --now keepalived
-systemctl enable --now llm-config-watch llm-config-sync.timer
+systemctl enable --now llm-config-watch llm-config-sync.timer rpc-cache-check.timer
 ```
 
 Point your clients at `http://<vip>:4000/v1`, with the master key as their API key, and model
@@ -472,6 +475,28 @@ are the same hardware, so a build made on one runs on the other.
   empty, so deleting everything else there still syncs.
 - **Applying it.** LiteLLM reads its config at start: run `systemctl restart litellm` on the
   console that holds the VIP. The log is `/root/logs/llm-config-sync.log`.
+
+### Optional: a cache drive
+
+The worker's RPC weight cache can live on a separate drive, freeing its system drive. Format any
+USB drive or SD card as ext4 with the label `LLAMACACHE` (`mkfs.ext4 -L LLAMACACHE -m 0 /dev/sdX1`)
+and plug it into the **worker**. The cache is only read when the pool starts, so this only changes
+how long a pool start takes; it never touches inference.
+- **Each start of `ggml-rpc` chooses** ([`run-rpc-server.sh`](cluster/bin/run-rpc-server.sh)):
+  the `LLAMACACHE` drive if it's on a USB 3 link, else `/root/.cache/llama.cpp/rpc` if that folder
+  exists, else no cache. `llm-mode status` shows the choice.
+- **USB 3 only.** A USB 2 link (~20–40 MB/s) is slower than the coordinator sending the weights
+  over gigabit, so a drive there is skipped. A network share (NAS, PC) doesn't help either: it
+  reaches the worker through the same ethernet port.
+- **Size:** about 60% of each model's GGUF per model version (the worker's share), plus some for
+  changed `-ts` splits. 32 GB holds several versions. Old versions are never removed.
+- **Moving it:** the files are named by their content hash, so the drive works on whichever
+  console is the worker. On the coordinator it is mounted and ignored.
+- **Damaged files.** `ggml-rpc-server` never checks a cache file against its name when loading,
+  so a damaged file would load as bad weights. `rpc-cache-check.timer` re-hashes the cache weekly
+  ([`rpc-cache-check.c`](cluster/src/rpc-cache-check.c)) and deletes mismatches, which the
+  coordinator then sends again. Run `rpc-cache-check /mnt/llamacache/rpc` by hand after moving
+  the drive; the log is `/root/logs/rpc-cache-check.log`.
 
 ### Day to day
 
@@ -544,8 +569,8 @@ A 32 GB drive fits the debloated Ubuntu, the build, the LiteLLM venv and both mo
 coordinator, with little to spare. On the worker, the RPC weight cache
 (`/root/.cache/llama.cpp/rpc`) holds a copy of the worker's share of each model version it has
 received. Keep it: on later pool starts the worker reads those weights from its own drive instead
-of over the network, which is faster even on a USB drive. It isn't pruned, so clear it after
-changing models or builds.
+of over the network, which is faster even on a USB 3 drive. It isn't pruned, so clear it after
+changing models or builds, or move it to a [cache drive](#optional-a-cache-drive).
 
 #### Reboots
 - **Any reboot drops the jailbreak,** including `systemctl reboot`. Someone has to re-run it at
@@ -594,8 +619,9 @@ cluster/                      Part 2: the self-managing cluster
   bin/llm-config-watch          runs it on every change (inotify)
   bin/gateway-notify.sh         keepalived hook: LiteLLM follows the VIP
   bin/run-llama-pool.sh         Part 1's, with the worker's link address
-  bin/run-rpc-server.sh         Part 1's, bound to the link address
-  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer)
+  bin/run-rpc-server.sh         Part 1's, bound to the link address, picks the cache location
+  src/rpc-cache-check.c         verifies the RPC weight cache
+  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer), rpc-cache-check (+ .timer)
   litellm/                      config.yaml, vision_router.py, litellm.service, env.example
 ```
 
