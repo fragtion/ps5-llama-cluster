@@ -1,0 +1,54 @@
+#!/bin/sh
+# Fan control for one PS5 (ps5-linux kernel + ps5-linux-tools). The console's fan controller holds
+# the main chip at a target temperature. Linux can move that target or run the fan flat out, but it
+# can't set a fixed speed or read the fan's RPM.
+#   ps5-fan [status]    chip temperature, target, mode
+#   ps5-fan target <N>  hold the chip at N °C: lower spins the fan up sooner and harder
+#   ps5-fan max         full speed (loud)
+#   ps5-fan auto        back to automatic, with the target this console booted with
+# Nothing survives a reboot: ps5fan.service starts the fan in automatic again.
+# Each mode change resets the target: `ps5_control --fan on` sets 91 °C, and `--fan max` only sets
+# 86 °C. So max also sets a target far below anything the chip reaches under load, which keeps the
+# controller at its top speed.
+dev=/sys/devices/platform/ps5-fan/target_temp
+ctl=/usr/local/sbin/ps5_control
+state=/run/ps5-fan   # the controller can't report its mode, so remember what was set here
+mkdir -p $state
+
+# The first change records the boot target, so `auto` can restore it.
+save_boot() { [ -s $state/boot-target ] || cat $dev > $state/boot-target; }
+
+chip_temp() {
+  for h in /sys/class/hwmon/hwmon*; do
+    [ "$(cat $h/name)" = k10temp ] && { echo $(( $(cat $h/temp1_input) / 1000 )); return; }
+  done
+  echo '?'
+}
+
+case "$1" in
+  status|"")
+    target=$(cat $dev) || exit 1
+    boot=$(cat $state/boot-target 2>/dev/null)
+    echo "chip    $(chip_temp) °C"
+    echo "target  $target °C$([ -n "$boot" ] && [ "$boot" != "$target" ] && echo " (booted with $boot)")"
+    echo "mode    $(cat $state/mode 2>/dev/null || echo auto)"
+    echo "boost   $([ "$(systemctl is-active ps5boost.service)" = active ] && echo on || echo off)" ;;
+  target)
+    case "$2" in ''|*[!0-9]*) echo "usage: ps5-fan target <0-100>"; exit 2 ;; esac
+    [ "$2" -le 100 ] || { echo "the controller accepts 0-100 °C"; exit 2; }
+    save_boot
+    echo "$2" > $dev || exit 1
+    echo "target $2 °C" ;;
+  max)
+    save_boot
+    $ctl --fan max > /dev/null || exit 1
+    echo 50 > $dev || exit 1
+    echo max > $state/mode
+    echo "fan at full speed; \`ps5-fan auto\` to undo" ;;
+  auto)
+    $ctl --fan on > /dev/null || exit 1
+    echo auto > $state/mode
+    [ -s $state/boot-target ] && cat $state/boot-target > $dev
+    echo "automatic, target $(cat $dev) °C" ;;
+  *) echo "usage: ps5-fan status|target <N>|max|auto"; exit 2 ;;
+esac

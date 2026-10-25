@@ -40,12 +40,12 @@ model_list:
 
   # Where `ps5` requests with images go while no pool is up (standalone mode is text only): any
   # OpenAI-compatible server with a vision model, e.g. LM Studio or llama-server on another machine.
-  # Set VISION_FALLBACK_API_BASE and VISION_FALLBACK_MODEL in /etc/litellm/env.
+  # Set VISION_FALLBACK_API_BASE, VISION_FALLBACK_MODEL and VISION_FALLBACK_API_KEY in /etc/litellm/env.
   - model_name: vision-fallback
     litellm_params:
       model: os.environ/VISION_FALLBACK_MODEL
       api_base: os.environ/VISION_FALLBACK_API_BASE
-      api_key: none
+      api_key: os.environ/VISION_FALLBACK_API_KEY
       timeout: 600
 
   # Any other model server on your network can sit behind the same gateway. If it is text only, list

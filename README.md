@@ -224,6 +224,7 @@ The files are in [`system/`](system). Copy them on **both** consoles:
 cp system/sysctl.d/*.conf /etc/sysctl.d/          # min_free_kbytes, BBR, ARP (see the comments)
 cp system/modules-load.d/bbr.conf /etc/modules-load.d/
 cp system/zram-generator.conf /etc/systemd/       # compressed swap, half of RAM, zstd
+mkdir -p /root/bin && cp system/bin/ps5-fan /root/bin/   # fan control, see Temperatures below
 modprobe tcp_bbr && sysctl --system
 ```
 
@@ -537,7 +538,7 @@ cp my-script.sh /root/sync/     # on either console: it's on both within seconds
 |---|---|
 | `ps5` | The console whose daemon reports a ready server: ps5a first (pooled or standalone), else ps5b standalone. Images go to the pool, or to `vision-fallback` when there is none. |
 | `ps5a`, `ps5b` | That console, whatever it runs. |
-| `vision-fallback` | Any OpenAI-compatible vision model on your network (`VISION_FALLBACK_*` in `/etc/litellm/env`). |
+| `vision-fallback` | Any OpenAI-compatible vision model on your network (`VISION_FALLBACK_*` in `/etc/litellm/env`, with its API key if it needs one). |
 | *your own* | Add other servers to `config.yaml`. If they're text only, list them in `TEXT_ONLY_MODELS`: images sent to them are replaced by a description from the pool (or the fallback), cached by image hash. |
 
 The routing hook asks both daemons for their status before choosing (cached 5 s). A console
@@ -606,8 +607,25 @@ LAN clients, Wi-Fi clients included, reach the ethernet addresses and the VIP no
 
 #### Temperatures
 `cat /sys/class/hwmon/hwmon*/temp1_input` gives the CPU temperature in millidegrees (`k10temp`).
+Linux sees no GPU temperature and no fan speed.
 Keep `ps5fan.service` enabled whenever `ps5boost.service` is: boost without the fan is asking
 for trouble.
+
+The console's fan controller holds the chip at a target temperature, 91 °C after
+`ps5_control --fan on`. That's why the fan stays quiet under load. [`ps5-fan`](system/bin/ps5-fan)
+changes it:
+
+```bash
+ps5-fan                 # chip temperature, target, mode, boost
+ps5-fan target 80       # spin up sooner and harder (0-100 °C)
+ps5-fan max             # full speed
+ps5-fan auto            # back to automatic and the target the console booted with
+```
+
+- **Every mode change resets the target.** `ps5_control --fan max` alone only sets it to 86 °C,
+  so `ps5-fan max` also sets 50 °C.
+- **Nothing survives a reboot.**
+- **Linux can't set a fixed speed.**
 
 ---
 
@@ -615,6 +633,7 @@ for trouble.
 
 ```
 system/                       Part 0: tuning for both consoles
+  bin/ps5-fan                   fan target / full speed / back to automatic
   sysctl.d/90-llm-memory.conf   vm.min_free_kbytes
   sysctl.d/91-llm-net.conf      BBR + fq, no slow start after idle
   sysctl.d/92-llm-arp.conf      ARP flux fix (ethernet + Wi-Fi in one subnet)

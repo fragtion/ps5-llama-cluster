@@ -25,6 +25,7 @@ TEXT_ONLY = {m.strip() for m in os.environ.get("TEXT_ONLY_MODELS", "").split(","
 # config.yaml reads the same variables; the model carries LiteLLM's "openai/" provider prefix
 FALLBACK_URL = os.environ.get("VISION_FALLBACK_API_BASE", "").removesuffix("/").removesuffix("/v1")
 FALLBACK_MODEL = os.environ.get("VISION_FALLBACK_MODEL", "").removeprefix("openai/")
+FALLBACK_KEY = os.environ.get("VISION_FALLBACK_API_KEY", "none")
 CACHE_PATH = "/var/lib/litellm/image-captions.json"
 PROMPT = ("Describe this image for someone who cannot see it. Transcribe all visible text exactly, "
           "including code, numbers and error messages. Then describe layout, UI elements and anything unusual. "
@@ -83,17 +84,20 @@ async def _describe(url: str) -> str:
     if key in _cache:
         return _cache[key]
     node = await serving_ps5()
+    headers = {}
     if node and node[2]:
         base, model = node[1], "ps5"
     else:
         base, model = FALLBACK_URL, FALLBACK_MODEL
+        if FALLBACK_KEY != "none":
+            headers["Authorization"] = f"Bearer {FALLBACK_KEY}"
     body = {"model": model, "temperature": 0, "max_tokens": 1024,
             "messages": [{"role": "user", "content": [
                 {"type": "text", "text": PROMPT},
                 {"type": "image_url", "image_url": {"url": url}}]}]}
     try:
         async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.post(f"{base}/v1/chat/completions", json=body)
+            r = await client.post(f"{base}/v1/chat/completions", json=body, headers=headers)
             r.raise_for_status()
             text = r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:  # no vision model up: say so, and don't cache it
