@@ -353,6 +353,7 @@ Part 1 needs you at a shell. Part 2 adds:
 | **keepalived** | A floating gateway address (the VIP) held by one console at a time. LiteLLM runs only on that console. |
 | **`llm-sync`** | Pushes the software and config from the console you changed to the other one over the link (rsync). |
 | **`llm-config-sync`** | Keeps `/etc/litellm`, the cluster YAML and a shared `/root/sync` folder the same on both consoles, both ways and deletions included, seconds after a change (unison, an inotify watcher, and a timer that catches up). |
+| **`llm-dash`** ([`cluster/bin/llm-dash.py`](cluster/bin/llm-dash.py), `llm-dash.service`) | A web page on either console's `:50080` showing both consoles: temperature, CPU, memory, GPU memory, disk and link graphs (6 h), services, models. It has buttons for the fan, the llama.cpp mode and model sync. |
 
 ### Behaviour
 
@@ -443,6 +444,7 @@ systemctl disable --now llama-pool ggml-rpc llama-qwen 2>/dev/null   # the daemo
 systemctl enable --now llm-peer
 systemctl enable --now keepalived
 systemctl enable --now llm-config-watch llm-config-sync.timer rpc-cache-check.timer
+systemctl enable --now llm-dash                                     # http://<either console>:50080/
 ```
 
 Point your clients at `http://<vip>:4000/v1`, with the master key as their API key, and model
@@ -530,7 +532,21 @@ tail -f /root/logs/llm-peer.log /root/logs/gateway.log
 nano /etc/litellm/config.yaml   # on either console: it reaches the other within seconds
 systemctl restart litellm       # on the console holding the VIP, to apply it
 cp my-script.sh /root/sync/     # on either console: it's on both within seconds
+llm-cluster set models.sync true|false   # the same as the dashboard's model sync button
 ```
+
+**The dashboard**, `http://<either console>:50080/`, shows both consoles whichever one you open
+(it fetches the other over the link).
+- **Graphs:** chip temperature with the fan target, CPU, memory, link and disk throughput, and
+  busy llama.cpp slots, over 15 min, 1 h or 6 h. History is kept in memory, so a restart of
+  `llm-dash` clears it.
+- **Per console:** mode and readiness, the gateway, services, RAM, swap, GPU memory, disk, models
+  and the weight cache.
+- **Buttons:** the fan (auto, max, a target), the llama.cpp mode (as `llm-mode`), and model sync.
+  - They need the gateway's master key, which the page asks for once and keeps in the browser.
+    Reading needs no key: anyone on your LAN can see the page.
+  - A button under the other console is passed on to it.
+  - None of them can reboot anything.
 
 ### Gateway models
 
@@ -651,7 +667,8 @@ pool/                         Part 1: the simple pool
   systemd/                      llama-pool, ggml-rpc, llama-qwen (standalone) units
 cluster/                      Part 2: the self-managing cluster
   etc/llm-cluster.yaml          the one config file
-  bin/llm_cluster.py            `llm-cluster get|ensure`
+  bin/llm_cluster.py            `llm-cluster get|set|ensure`
+  bin/llm-dash.py, llm-dash.html  the web dashboard on :50080
   bin/llm-peerd.py              the peer daemon
   bin/llm-mode                  replaces Part 1's (auto mode, role from the YAML)
   bin/llm-sync                  rsync push to the other console
@@ -661,7 +678,7 @@ cluster/                      Part 2: the self-managing cluster
   bin/run-llama-pool.sh         Part 1's, with the worker's link address
   bin/run-rpc-server.sh         Part 1's, bound to the link address, picks the cache location
   src/rpc-cache-check.c         verifies the RPC weight cache
-  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer), llm-models-sync, rpc-cache-check (+ .timer)
+  systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer), llm-models-sync, rpc-cache-check (+ .timer), llm-dash
   litellm/                      config.yaml, vision_router.py, litellm.service, env.example
 ```
 

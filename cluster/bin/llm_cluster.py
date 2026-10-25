@@ -7,8 +7,13 @@
   llm-cluster ensure      apply this node's part of the file: the link address (NetworkManager
                           profile and live), /etc/hosts, the RPC server's firewall, keepalived.conf,
                           and with models.sync on, removing the RPC weight cache
+  llm-cluster set models.sync true|false
+                          change it in place, comments kept. llm-config-watch then copies the file to
+                          the other console and both apply it.
 """
 import ipaddress
+import os
+import re
 import shutil
 import socket
 import subprocess
@@ -141,12 +146,38 @@ def ensure(cfg):
     ensure_model_sync(cfg)
 
 
+# the keys `set` may change, with their allowed values
+SETTABLE = {"models.sync": ("true", "false")}
+
+
+def set_value(key, value):
+    """Rewrite one `key: value` line inside its section, keeping the comments and the layout."""
+    if value not in SETTABLE.get(key, ()):
+        sys.exit(f"set: {key} can't be set to {value!r} (settable: {SETTABLE})")
+    section, name = key.split(".")
+    lines = Path(PATH).read_text().split("\n")
+    start = lines.index(f"{section}:")
+    for i in range(start + 1, len(lines)):
+        if lines[i] and not lines[i][0].isspace():
+            break  # the next top-level section: not found
+        m = re.match(rf"(\s+{name}:\s*)\S+(.*)$", lines[i])
+        if m:
+            lines[i] = m.group(1) + value + m.group(2)
+            tmp = PATH + ".tmp"
+            Path(tmp).write_text("\n".join(lines))
+            os.replace(tmp, PATH)  # one event for the watcher, never a half-written file
+            return
+    sys.exit(f"set: {key} is not in {PATH}")
+
+
 def main(argv):
     cfg = load()
     if len(argv) in (3, 4) and argv[1] == "get":
         print(get(cfg, *argv[2:]))
     elif len(argv) == 2 and argv[1] == "ensure":
         ensure(cfg)
+    elif len(argv) == 4 and argv[1] == "set":
+        set_value(argv[2], argv[3])
     else:
         sys.exit(__doc__)
 

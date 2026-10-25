@@ -1,0 +1,18 @@
+[Unit]
+Description=Web dashboard for the PS5 pair (:50080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /root/bin/llm-dash.py
+Restart=always
+RestartSec=10
+# small and expendable: under memory pressure it goes before llama-server
+MemoryMax=96M
+OOMScoreAdjust=800
+Nice=10
+StandardOutput=append:/root/logs/llm-dash.log
+StandardError=append:/root/logs/llm-dash.log
+
+[Install]
+WantedBy=multi-user.target

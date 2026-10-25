@@ -21,6 +21,7 @@ rsync -aiR --delete $dry -e "ssh -o BatchMode=yes" --exclude __pycache__ \
   etc/systemd/system/llm-config-sync.service etc/systemd/system/llm-config-watch.service \
   etc/systemd/system/llm-config-sync.timer etc/systemd/system/llm-models-sync.service \
   etc/systemd/system/rpc-cache-check.service etc/systemd/system/rpc-cache-check.timer \
+  etc/systemd/system/llm-dash.service \
   etc/sysctl.d/90-llm-memory.conf etc/sysctl.d/91-llm-net.conf etc/sysctl.d/92-llm-arp.conf \
   etc/modules-load.d/bbr.conf \
   "root@$peer:/"

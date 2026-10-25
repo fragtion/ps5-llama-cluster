@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS5 Pool</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #667085; --line: #e3e6ea;
+  --accent: #2563eb; --a: #2563eb; --b: #e8590c; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+  --pill: #eef1f4; --bar: #e9edf1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --card: #171b21; --text: #e6e9ed; --muted: #8b95a3; --line: #262c34;
+    --accent: #60a5fa; --a: #60a5fa; --b: #fb923c; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    --pill: #222831; --bar: #232a33;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1216; --card: #171b21; --text: #e6e9ed; --muted: #8b95a3; --line: #262c34;
+  --accent: #60a5fa; --a: #60a5fa; --b: #fb923c; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+  --pill: #222831; --bar: #232a33;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 14px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+h3 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; }
+.muted { color: var(--muted); }
+.spacer { flex: 1; }
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-width: 0; }
+.node-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.big { font-size: 34px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.pill { background: var(--pill); border-radius: 999px; padding: 2px 9px; font-size: 12px; white-space: nowrap; }
+.pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); } .pill.warn { color: var(--warn); }
+button, select, input { font: inherit; color: var(--text); background: var(--pill);
+  border: 1px solid var(--line); border-radius: 7px; padding: 4px 10px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+input[type=number] { width: 64px; }
+.bar { height: 8px; background: var(--bar); border-radius: 4px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); }
+.bar.hot > div { background: var(--warn); }
+.kv { display: grid; grid-template-columns: 90px 1fr auto; gap: 4px 10px; align-items: center; font-size: 13px; }
+.kv .v { font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; white-space: nowrap; }
+.charts { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); margin-top: 14px; }
+.chart-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.readout { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+canvas { width: 100%; height: 170px; display: block; margin-top: 6px; }
+.warnbox { border-left: 3px solid var(--warn); padding: 6px 10px; background: var(--pill); border-radius: 6px; font-size: 13px; }
+#toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: calc(100% - 32px);
+  background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+  white-space: pre-wrap; display: none; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+.models { font-size: 12px; color: var(--muted); }
+.offline { opacity: .55; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PS5 Pool</h1>
+    <span class="muted" id="sub">loading…</span>
+    <span class="spacer"></span>
+    <span class="row" id="range">
+      <button data-r="900">15 min</button><button data-r="3600" class="on">1 h</button><button data-r="21600">6 h</button>
+    </span>
+    <button id="keybtn">Set key</button>
+  </header>
+
+  <div class="grid" id="nodes"></div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="node-head"><h2 style="margin:0">Model sync</h2><span id="syncstate" class="pill"></span>
+      <span class="spacer"></span><button id="syncbtn" disabled>…</button></div>
+    <p class="warnbox" style="margin:10px 0 0">
+      <b>Model sync and the RPC weight cache can't both be on.</b> With model sync on, <code>/root/models</code> is
+      kept identical on both consoles, and turning it on <b>deletes the worker's RPC weight cache</b> to make room.
+      Every pool start then sends the worker's share (~6 GB) over the link again, which takes longer. Inference is
+      the same. Turning it off deletes nothing; the cache rebuilds on the next pool starts.</p>
+  </div>
+
+  <div class="charts" id="charts"></div>
+  <p class="muted" style="font-size:12px;margin-top:14px">Each console keeps 6 h of samples (every 5 s) in memory; a
+    restart of <code>llm-dash</code> clears them. The temperature is the chip's CPU-side sensor: Linux sees no GPU temperature
+    and no fan speed. Buttons need the gateway's master key and act on the console they're under.</p>
+</main>
+<div id="toast"></div>
+<script>
+"use strict";
+const COLORS = () => { const s = getComputedStyle(document.documentElement);
+  return { a: s.getPropertyValue("--a").trim(), b: s.getPropertyValue("--b").trim(),
+           line: s.getPropertyValue("--line").trim(), muted: s.getPropertyValue("--muted").trim() }; };
+const state = { self: null, nodes: {}, order: [], hist: {}, last: {}, range: 3600 };
+const CHARTS = [
+  { id: "temp", title: "Chip temperature", unit: "°C", series: [["temp", ""]], min: 40, max: 100, fixed: false },
+  { id: "cpu", title: "CPU", unit: "%", series: [["cpu", ""]], min: 0, max: 100, fixed: true },
+  { id: "mem", title: "Memory used", unit: "%", series: [["mem", ""]], min: 0, max: 100, fixed: true },
+  { id: "link", title: "Link (console to console)", unit: "MB/s", series: [["link_rx", "in"], ["link_tx", "out"]], min: 0, max: 1 },
+  { id: "disk", title: "Disk", unit: "MB/s", series: [["disk_r", "read"], ["disk_w", "write"]], min: 0, max: 1 },
+  { id: "busy", title: "Busy llama.cpp slots", unit: "", series: [["busy", ""]], min: 0, max: 2, step: true },
+];
+
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const gb = b => (b / 1e9).toFixed(1) + " GB";
+const getKey = () => { try { return localStorage.getItem("llmdash-key") || ""; } catch { return ""; } };
+const setKey = k => { try { k ? localStorage.setItem("llmdash-key", k) : localStorage.removeItem("llmdash-key"); } catch {} };
+function toast(msg, ms = 4000) { const t = $("#toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = "none", ms); }
+function dur(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; }
+function nodeColor(name) { const c = COLORS(); return state.order.indexOf(name) === 0 ? c.a : c.b; }
+
+async function poll() {
+  try {
+    const since = Math.min(...state.order.map(n => state.last[n] ?? 0), Infinity);
+    const r = await fetch(`/api/nodes?since=${isFinite(since) ? since : 0}`, { cache: "no-store" });
+    const j = await r.json();
+    state.self = j.self;
+    const names = Object.keys(j.nodes).sort();
+    state.order = names;
+    for (const n of names) {
+      const d = j.nodes[n];
+      state.nodes[n] = d;
+      if (d.error) continue;
+      const h = state.hist[n] || (state.hist[n] = []);
+      const idx = Object.fromEntries(d.keys.map((k, i) => [k, i]));
+      for (const row of d.rows) {
+        if (row[idx.t] <= (state.last[n] ?? 0)) continue;
+        const o = {}; for (const k of d.keys) o[k] = row[idx[k]];
+        h.push(o); state.last[n] = o.t;
+      }
+      const cut = Date.now() / 1000 - 6 * 3600; while (h.length && h[0].t < cut) h.shift();
+    }
+    render();
+  } catch (e) { $("#sub").textContent = "can't reach this console: " + e.message; }
+}
+
+async function act(node, action, value, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  let key = getKey();
+  if (!key) { key = prompt("Gateway master key (LITELLM_MASTER_KEY in /etc/litellm/env):") || ""; if (!key) return; setKey(key); }
+  toast(`${node}: ${action} ${value}…`, 60000);
+  try {
+    const r = await fetch("/api/action", { method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+      body: JSON.stringify({ node, action, value }) });
+    const j = await r.json();
+    if (r.status === 403) { setKey(""); updateKeyBtn(); }
+    toast(r.ok && j.ok ? `${node}: done${j.output ? "\n" + j.output : ""}` : `${node}: failed (${r.status})\n${j.output || j.error || ""}`, 7000);
+  } catch (e) { toast("request failed: " + e.message); }
+  updateKeyBtn(); setTimeout(poll, 800);
+}
+
+function unitPill(name, s) {
+  const cls = s === "active" ? "ok" : s === "failed" ? "bad" : s === "activating" ? "warn" : "";
+  return `<span class="pill ${cls}" title="${esc(name)}: ${esc(s)}">${esc(name)}</span>`;
+}
+function bar(label, used, total, hotAt = 0.9) {
+  const f = total ? Math.min(used / total, 1) : 0;
+  return `<span>${label}</span><div class="bar ${f >= hotAt ? "hot" : ""}"><div style="width:${(f * 100).toFixed(1)}%"></div></div>
+    <span class="v">${gb(used)} / ${gb(total)}</span>`;
+}
+
+function renderNode(name) {
+  const d = state.nodes[name];
+  if (!d || d.error) return `<div class="card offline"><div class="node-head"><span class="dot" style="background:${nodeColor(name)}"></span>
+    <h2 style="margin:0">${esc(name)}</h2><span class="pill bad">${esc(d ? d.error : "no data")}</span></div>
+    <p class="muted">History from before it went away stays on the charts.</p></div>`;
+  const i = d.info, h = state.hist[name] || [], now = h[h.length - 1] || {};
+  const p = i.peerd, mode = p ? p.mode : (i.units["llm-peer"] === "active" ? "starting" : "manual");
+  const auto = i.units["llm-peer"] === "active";
+  const fanMode = i.fan.mode, tgt = i.fan.target;
+  const disk = i.disks.map(x => bar(x.path === "/" ? "disk /" : "cache drive", x.used, x.total)).join("");
+  const slots = i.slots ? `${i.slots.filter(s => s.busy).length} of ${i.slots.length} busy · ${i.slots[0].n_ctx.toLocaleString()} ctx` : "no llama-server";
+  const cache = i.models_sync ? "none (model sync is on)" : i.cache_choice || (i.rpc_cache != null ? gb(i.rpc_cache) + " in /root/.cache/llama.cpp/rpc" : "none here");
+  const modeBtn = (v, label, warn) => `<button class="${(!auto && mode === v) || (v === "auto" && auto) ? "on" : ""}"
+    onclick="act('${name}','mode','${v}',${warn ? `'${warn}'` : "null"})">${label}</button>`;
+  return `<div class="card">
+    <div class="node-head"><span class="dot" style="background:${nodeColor(name)}"></span>
+      <h2 style="margin:0">${esc(name)}</h2><span class="muted">${esc(i.role)} · up ${dur(i.uptime)}</span>
+      ${i.gateway.here ? `<span class="pill ok" title="holds ${esc(i.gateway.vip)}">gateway</span>` : ""}</div>
+    <div class="row" style="margin-top:10px;gap:18px;align-items:flex-end">
+      <div><div class="big">${now.temp != null ? Math.round(now.temp) + "°" : "–"}</div><div class="muted">chip</div></div>
+      <div><div class="big" style="font-size:22px">${tgt ?? "–"}°</div><div class="muted">fan target · ${esc(fanMode)}</div></div>
+      <div><div class="big" style="font-size:22px">${esc(mode)}${p && p.ready ? "" : p ? " …" : ""}</div>
+        <div class="muted">${auto ? "automatic" : "manual"} · ${p && p.ready ? "ready" : "not ready"}</div></div>
+    </div>
+    <h3>Fan</h3>
+    <div class="row">
+      <button class="${fanMode === "auto" && tgt === i.fan.boot_target || fanMode === "auto" && !i.fan.boot_target ? "on" : ""}" onclick="act('${name}','fan','auto')">Auto</button>
+      <button class="${fanMode === "max" ? "on" : ""}" onclick="act('${name}','fan','max')">Max</button>
+      <span class="muted">target</span><input type="number" min="40" max="95" value="${tgt ?? 80}" id="tgt-${name}">
+      <button onclick="act('${name}','fan',document.getElementById('tgt-${name}').value)">Set</button>
+    </div>
+    <h3>llama.cpp</h3>
+    <div class="row">${modeBtn("auto", "Auto")}${modeBtn(i.pooled_mode, i.pooled_mode === "pool" ? "Pool" : "Worker",
+        "Manual mode stops the automatic daemon on " + name + ". Continue?")}${modeBtn("standalone", "Standalone",
+        "Manual mode stops the automatic daemon on " + name + ". Continue?")}${modeBtn("off", "Off",
+        "Stop llama.cpp on " + name + "? Requests to it will fail until you pick another mode.")}</div>
+    <div class="muted" style="margin-top:6px;font-size:13px">slots: ${slots} · weight cache: ${esc(cache)}</div>
+    <h3>Memory and disk</h3>
+    <div class="kv">${bar("RAM", i.mem_total * (now.mem ?? 0) / 100, i.mem_total)}
+      ${bar("swap", (now.swap ?? 0) * 2 ** 20, i.swap_total, 0.5)}
+      ${bar("GPU VRAM", (now.vram ?? 0) * 2 ** 20, i.vram_total, 1.1)}
+      ${bar("GPU GTT", (now.gtt ?? 0) * 2 ** 20, i.gtt_total)}${disk}</div>
+    <h3>Services</h3>
+    <div class="row">${Object.entries(i.units).map(([u, s]) => unitPill(u, s)).join("")}</div>
+    <h3>Models</h3>
+    <div class="models">${i.models.map(m => `${esc(m.name)} · ${gb(m.size)}`).join("<br>") || "none"}</div>
+  </div>`;
+}
+
+function render() {
+  const live = state.order.filter(n => !state.nodes[n].error);
+  const gw = live.find(n => state.nodes[n].info.gateway.here);
+  $("#sub").textContent = `viewing via ${state.self} · gateway on ${gw || "neither"} · updated ${new Date().toLocaleTimeString()}`;
+  // don't re-render a card while its target box is being typed in
+  const focused = document.activeElement && document.activeElement.id && document.activeElement.id.startsWith("tgt-");
+  if (!focused) $("#nodes").innerHTML = state.order.map(renderNode).join("");
+  const any = live[0] && state.nodes[live[0]].info;
+  if (any) {
+    $("#syncstate").textContent = any.models_sync ? "on" : "off";
+    $("#syncstate").className = "pill " + (any.models_sync ? "ok" : "");
+    const b = $("#syncbtn"); b.disabled = false;
+    b.textContent = any.models_sync ? "Turn off" : "Turn on";
+    b.onclick = () => act(state.self, "models.sync", any.models_sync ? "false" : "true", any.models_sync
+      ? "Turn model sync off? Nothing is deleted; the worker's RPC weight cache rebuilds on the next pool starts."
+      : "Turn model sync on? This DELETES the worker's RPC weight cache, and every pool start then resends ~6 GB over the link.");
+  }
+  drawCharts();
+}
+
+function setupCharts() {
+  $("#charts").innerHTML = CHARTS.map(c => `<div class="card"><div class="chart-head"><h2 style="margin:0">${c.title}</h2>
+    <span class="readout" id="ro-${c.id}"></span></div><canvas id="cv-${c.id}"></canvas></div>`).join("");
+  for (const c of CHARTS) {
+    const cv = $("#cv-" + c.id);
+    cv.addEventListener("mousemove", e => { c.hover = e.offsetX / cv.clientWidth; drawChart(c); });
+    cv.addEventListener("mouseleave", () => { c.hover = null; drawChart(c); });
+  }
+}
+function drawCharts() { for (const c of CHARTS) drawChart(c); }
+
+function drawChart(c) {
+  const cv = $("#cv-" + c.id); if (!cv) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const col = COLORS(), L = 38, R = 8, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
+  const t1 = Date.now() / 1000, t0 = t1 - state.range;
+  const lines = [];
+  for (const n of state.order) {
+    const h = (state.hist[n] || []).filter(p => p.t >= t0);
+    c.series.forEach(([k, label], si) => lines.push({ n, k, label, dash: si > 0, pts: h.filter(p => p[k] != null).map(p => [p.t, p[k]]) }));
+  }
+  let lo = c.min, hi = c.max;
+  for (const l of lines) for (const [, v] of l.pts) { if (!c.fixed) { hi = Math.max(hi, v); lo = Math.min(lo, v); } }
+  if (c.id === "temp") { lo = Math.min(lo, 40); hi = Math.max(hi, 100); lo = Math.floor(lo / 10) * 10; hi = Math.ceil(hi / 10) * 10; }
+  else if (!c.fixed) hi = niceMax(hi);
+  const X = t => L + (t - t0) / (t1 - t0) * pw, Y = v => T + ph - (v - lo) / (hi - lo || 1) * ph;
+  g.font = "11px system-ui, sans-serif"; g.fillStyle = col.muted; g.strokeStyle = col.line; g.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + (hi - lo) * i / 4, y = Math.round(Y(v)) + .5;
+    g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke();
+    g.textAlign = "right"; g.fillText(fmt(v), L - 5, y + 4);
+  }
+  g.textAlign = "center";
+  const step = state.range <= 900 ? 300 : state.range <= 3600 ? 900 : 3600;
+  for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) {
+    const d = new Date(t * 1000); g.fillText(d.toTimeString().slice(0, 5), X(t), H - 5);
+  }
+  if (c.id === "temp") {  // the fan targets, as dotted lines
+    for (const n of state.order) { const i = state.nodes[n].info; if (!i || !i.fan.target) continue;
+      g.setLineDash([2, 4]); g.strokeStyle = nodeColor(n); g.globalAlpha = .6;
+      g.beginPath(); g.moveTo(L, Y(i.fan.target)); g.lineTo(W - R, Y(i.fan.target)); g.stroke(); g.globalAlpha = 1; }
+  }
+  for (const l of lines) {
+    g.strokeStyle = nodeColor(l.n); g.lineWidth = 1.6; g.setLineDash(l.dash ? [5, 3] : []);
+    g.beginPath(); let prev = null;
+    for (const [t, v] of l.pts) {
+      const x = X(t), y = Y(v);
+      if (!prev || t - prev > 20) g.moveTo(x, y); else if (c.step) { g.lineTo(x, Y(l.pts.find(p => p[0] === prev)[1])); g.lineTo(x, y); } else g.lineTo(x, y);
+      prev = t;
+    }
+    g.stroke();
+  }
+  g.setLineDash([]);
+  const ro = $("#ro-" + c.id);
+  let at = null;
+  if (c.hover != null) { at = t0 + (c.hover * W - L) / pw * (t1 - t0);
+    g.strokeStyle = col.muted; g.beginPath(); g.moveTo(X(at), T); g.lineTo(X(at), T + ph); g.stroke(); }
+  ro.innerHTML = lines.map(l => {
+    let p = l.pts[l.pts.length - 1];
+    if (at != null) p = l.pts.reduce((b, q) => !b || Math.abs(q[0] - at) < Math.abs(b[0] - at) ? q : b, null);
+    return p ? `<span style="color:${nodeColor(l.n)}">${l.n}${l.label ? " " + l.label : ""} ${fmt(p[1])}${/^[°%]/.test(c.unit) ? "" : " "}${c.unit}</span>` : "";
+  }).filter(Boolean).join(" · ") + (at != null ? ` <span>@ ${new Date(at * 1000).toTimeString().slice(0, 8)}</span>` : "");
+}
+const niceMax = v => { if (v <= 0) return 1; const p = 10 ** Math.floor(Math.log10(v)); return [1, 2, 5, 10].map(m => m * p).find(m => m >= v); };
+const fmt = v => Math.abs(v) >= 10 || Number.isInteger(v) ? Math.round(v).toString() : String(+v.toFixed(2));
+
+function updateKeyBtn() { $("#keybtn").textContent = getKey() ? "Forget key" : "Set key"; }
+$("#keybtn").onclick = () => { if (getKey()) setKey(""); else { const k = prompt("Gateway master key:"); if (k) setKey(k.trim()); } updateKeyBtn(); };
+for (const b of document.querySelectorAll("#range button")) b.onclick = () => {
+  state.range = +b.dataset.r; document.querySelectorAll("#range button").forEach(x => x.classList.toggle("on", x === b)); drawCharts(); };
+window.addEventListener("resize", drawCharts);
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+setupCharts(); updateKeyBtn(); poll(); setInterval(poll, 5000);
+</script>
+</body>
+</html>
