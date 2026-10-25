@@ -1,16 +1,40 @@
 # ps5-llama-cluster
 
-**Two jailbroken PlayStation 5 consoles running one 27B LLM together.** Each PS5 runs Ubuntu
-natively (via [ps5-linux](https://github.com/ps5-linux)), and llama.cpp's RPC backend splits the
-model's layers across both GPUs over gigabit ethernet. The pair serves
-[Qwen3.8-27B-GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF) IQ3_S with
-vision at the full 262K context (q8_0 KV cache) at roughly 20 tokens/s, from hardware that
-would otherwise sit under a TV.
+**Jailbroken PlayStation 5 consoles as LLM servers: one on its own, or two running one 27B LLM
+together.** Each PS5 runs Ubuntu natively (via [ps5-linux](https://github.com/ps5-linux)). Pooled,
+llama.cpp's RPC backend splits the model's layers across both GPUs over gigabit ethernet, and the
+pair serves [Qwen3.8-27B-GSQ-RCO](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
+IQ3_S with vision at the full 262K context (q8_0 KV cache) at roughly 20 tokens/s, from hardware
+that would otherwise sit under a TV.
 
-The guide has three parts:
+<p align="center">
+  <img src="docs/screenshots/inference.png" alt="The dashboard's Inference tab: ps5a generating at 20 tokens/s while ps5b lends its GPU, the layer map of the 27B split across both consoles, and per-request decode and prefill speeds" width="100%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/consoles.png" alt="Overview: both consoles' temperatures, fan targets, llama.cpp modes, memory and services" width="32%">
+  <img src="docs/screenshots/graphs.png" alt="Overview graphs: chip temperature, CPU, memory, link, disk and busy slots" width="32%">
+  <img src="docs/screenshots/requests.png" alt="Recent requests: prompt, cache reuse, prefill and decode speed, MTP draft acceptance" width="32%">
+</p>
+<p align="center"><sub>The built-in dashboard (<code>llm-dash</code>, port 50080) on the pair: live inference and the layer split, both consoles at a glance, 6 h of graphs, and every request's speed.</sub></p>
+
+**One PS5 works well on its own too.** Compared with the stock ps5-linux desktop, the setup here is
+built for inference:
+- The desktop is stripped, so the model gets the memory.
+- The GPU gets an 8 GiB carve-out plus 15.5 GiB of GTT.
+- llama.cpp is built and tuned for the PS5's GPU (Vulkan/RADV, MTP speculative decoding).
+- `ps5-fan` sets the fan's temperature target.
+- A web dashboard shows temperatures, memory and every request's speed.
+
+One console runs the same 27B at IQ3_XXS with a 60K context
+([A single PS5](#a-single-ps5)) at about the same speed; a second console adds the larger quant,
+vision and the full 262K context.
+
+The guide has these parts:
 
 - **[Part 0: Ubuntu on the PS5, debloated](#part-0-ubuntu-on-the-ps5-debloated)**. Boot Linux on
   the consoles and strip the desktop so the model gets the memory.
+- **[A single PS5](#a-single-ps5)**. After Part 0, the model, fan control and the dashboard on
+  one console. This is all you need for one.
 - **[Part 1: a simple pool](#part-1-a-simple-pool)**. One console coordinates, the other lends
   its GPU, and you start them by hand. This is all you need to run the big model.
 - **[Part 2: the self-managing cluster](#part-2-the-self-managing-cluster)**. A small daemon on
@@ -44,6 +68,7 @@ The guide has three parts:
 - [What you need](#what-you-need)
 - [How it works](#how-it-works)
 - [Part 0: Ubuntu on the PS5, debloated](#part-0-ubuntu-on-the-ps5-debloated)
+- [A single PS5](#a-single-ps5)
 - [Part 1: a simple pool](#part-1-a-simple-pool)
 - [Part 2: the self-managing cluster](#part-2-the-self-managing-cluster)
 - [Lessons learned / troubleshooting](#lessons-learned--troubleshooting)
@@ -58,9 +83,12 @@ The guide has three parts:
 | Mode | Model | Context | Vision | Generation speed |
 |---|---|---|---|---|
 | **Pooled** (both consoles) | Qwen3.8-27B-GSQ-RCO **IQ3_S**-mtp (11.3 GiB) | 262,144, q8_0 KV | yes | ~21 tok/s code, ~14 tok/s prose |
-| **Standalone** (one console) | Qwen3.8-27B-GSQ-RCO **IQ3_XXS**-mtp (9.7 GiB) | 60,000, q4_0 KV | no | – |
+| **Standalone** (one console) | Qwen3.8-27B-GSQ-RCO **IQ3_XXS**-mtp (9.7 GiB) | 60,000, q4_0 KV | no | ~20 tok/s prose |
 
 Measured with MTP speculative decoding (`--spec-type draft-mtp`).
+- **One console writes faster than the pair:** 19.7–22 tok/s on the same 8.8K-token chat that
+  the pair served at 14–18. Its quant is smaller and no token crosses the network. The pair buys
+  the larger quant, vision and the full context.
 - **Long prompts:** a 77K-token prompt was read at 76 tok/s on average, then generated at 8.8 tok/s.
 - **Two slots** (`-np 2`) share the 262K KV pool, so a side request doesn't evict the main
   conversation. Two requests running at once got 9.4 + 10.9 tok/s.
@@ -72,13 +100,13 @@ weights can live on a cheap HDD or USB drive.
 
 ## What you need
 
-- **Two PS5 consoles that can be jailbroken.** This guide was written on firmware **13.60**, and
+- **A PS5 that can be jailbroken, or two for the pool.** This guide was written on firmware **13.60**, and
   the loader it uses is built for exactly that firmware ([Part 0](#0-boot-linux)). Don't update a
   console you want to use for this: newer firmware can close the exploit.
 - **A USB SSD or drive per console** for Ubuntu and the models: 32 GB at minimum, which is tight
   (see [disk space](#disk-space-is-tight)).
-- **Gigabit ethernet** between the consoles, through a switch or the same LAN. Wi-Fi works for
-  management, but the pool needs the wire.
+- **For the pool, gigabit ethernet** between the consoles, through a switch or the same LAN.
+  Wi-Fi works for management (and for a single console), but the pool needs the wire.
 - **A PC on the same LAN** to host the jailbreak page, flash the drives and SSH in.
 - **Cooling.** Read the [warning](#ps5-llama-cluster) above.
 
@@ -101,8 +129,8 @@ weights can live on a cheap HDD or USB drive.
 - **Memory.** Linux on a PS5 sees ~7 GB of ordinary RAM, plus the GPU's memory: an 8 GiB VRAM
   carve-out and up to ~15.5 GiB of GTT, from the same 16 GB pool. In practice that is about
   12.5–13 GiB per console for a model plus its KV cache.
-- **One console is not enough.** The 27B at IQ3_S with a 262K q8_0 KV cache doesn't fit on one
-  console. Two do: llama.cpp's RPC backend (`--rpc`) treats the second console's GPU as an extra
+- **One console holds a smaller quant.** The 27B at IQ3_S with a 262K q8_0 KV cache doesn't fit
+  on one console; IQ3_XXS with a 60K q4_0 cache does. Two consoles fit the larger quant: llama.cpp's RPC backend (`--rpc`) treats the second console's GPU as an extra
   device and puts a share of the layers there (`-ts 60,40`).
 - **Network use.** Only activations cross the network during inference. The worker receives its
   weights once and caches them on disk (`ggml-rpc-server -c`), so later loads skip the transfer.
@@ -257,6 +285,52 @@ We name them **ps5a** (coordinator) and **ps5b** (worker). Part 2 relies on thos
 
 ---
 
+## A single PS5
+
+After Part 0 (steps 0–3), one console needs four more things: llama.cpp, the model, its
+service and the dashboard. Everything lives under `/root`, as in Part 1.
+
+1. **Build llama.cpp** as in [Part 1, step 1](#1-build-llamacpp-both-consoles), on this console.
+   The build is the same; there's just no second console to match.
+2. **Fetch the model** (IQ3_XXS-mtp, 10.4 GB):
+
+   ```bash
+   /root/bin/fetch-models.sh standalone
+   ```
+3. **Install and start the service.** It starts at boot. The OpenAI-compatible API and llama.cpp's
+   web UI are then at `http://<console>:1234`.
+
+   ```bash
+   cp pool/systemd/llama-qwen.service /etc/systemd/system/
+   mkdir -p /etc/systemd/system/llama-qwen.service.d && cp system/systemd/oom.conf /etc/systemd/system/llama-qwen.service.d/
+   systemctl daemon-reload && systemctl enable --now llama-qwen
+   ```
+4. **Install the dashboard.**
+
+   ```bash
+   cp cluster/bin/llm-dash.py cluster/bin/llm-dash.html /root/bin/
+   cp cluster/systemd/llm-dash.service /etc/systemd/system/
+   echo "LLM_DASH_KEY=$(openssl rand -hex 16)" > /etc/default/llm-dash && chmod 600 /etc/default/llm-dash
+   systemctl daemon-reload && systemctl enable --now llm-dash      # http://<console>:50080/
+   ```
+
+   - **One console.** Without a two-console `/etc/llm-cluster.yaml` (Part 2), the dashboard shows
+     this console alone, laid out for one: one wide card, llama.cpp on/off instead of the pool
+     modes, no model sync, and the network graph follows the LAN interface.
+   - **The buttons** (fan, llama.cpp on/off) ask once for the key in `/etc/default/llm-dash`.
+
+`llm-mode standalone|off|status` and `ps5-fan` work as in the pool. The
+[run script](pool/bin/run-llama-standalone.sh) holds the model flags. Adding a second console
+later is Parts 1 and 2; nothing here needs undoing.
+
+<p align="center">
+  <img src="docs/screenshots/single-overview.png" alt="The dashboard on one console: temperature, fan, llama.cpp on/off, memory, services and graphs" width="49%">
+  <img src="docs/screenshots/single-inference.png" alt="The Inference tab on one console: live state, request speeds and the layer map" width="49%">
+</p>
+<p align="center"><sub>The same dashboard on a console of its own.</sub></p>
+
+---
+
 ## Part 1: a simple pool
 
 One build, three systemd units, and you switch between them by hand. Everything lives under
@@ -353,7 +427,7 @@ Part 1 needs you at a shell. Part 2 adds:
 | **keepalived** | A floating gateway address (the VIP) held by one console at a time. LiteLLM runs only on that console. |
 | **`llm-sync`** | Pushes the software and config from the console you changed to the other one over the link (rsync). |
 | **`llm-config-sync`** | Keeps `/etc/litellm`, the cluster YAML and a shared `/root/sync` folder the same on both consoles, both ways and deletions included, seconds after a change (unison, an inotify watcher, and a timer that catches up). |
-| **`llm-dash`** ([`cluster/bin/llm-dash.py`](cluster/bin/llm-dash.py), `llm-dash.service`) | A web page on either console's `:50080` showing both consoles: temperature, CPU, memory, GPU memory, disk and link graphs (6 h), services, models. It has buttons for the fan, the llama.cpp mode and model sync. An Inference tab shows llama.cpp's live state, per-request prefill and decode speeds and the layer map. |
+| **`llm-dash`** ([`cluster/bin/llm-dash.py`](cluster/bin/llm-dash.py), `llm-dash.service`) | A web page on either console's `:50080` showing both consoles (or, [without a pair](#a-single-ps5), the one): temperature, CPU, memory, GPU memory, disk and link graphs (6 h), services, models. It has buttons for the fan, the llama.cpp mode and model sync. An Inference tab shows llama.cpp's live state, per-request prefill and decode speeds and the layer map. |
 
 ### Behaviour
 
@@ -551,7 +625,9 @@ llm-cluster set models.sync true|false   # the same as the dashboard's model syn
   - **Layer map:** which console holds each layer, worked out from the model file and the run
     script the way llama.cpp's loader assigns them, beside each GPU's memory in use.
 - **Buttons:** the fan (auto, max, a target), the llama.cpp mode (as `llm-mode`), and model sync.
-  - They need the gateway's master key, which the page asks for once and keeps in the browser.
+  - They need a key, which the page asks for once and keeps in the browser: `LLM_DASH_KEY` from
+    `/etc/default/llm-dash` if you set one (the same on both consoles), otherwise the gateway's
+    master key.
     Reading needs no key: anyone on your LAN can see the page.
   - A button under the other console is passed on to it.
   - None of them can reboot anything.
@@ -676,7 +752,7 @@ pool/                         Part 1: the simple pool
 cluster/                      Part 2: the self-managing cluster
   etc/llm-cluster.yaml          the one config file
   bin/llm_cluster.py            `llm-cluster get|set|ensure`
-  bin/llm-dash.py, llm-dash.html  the web dashboard on :50080
+  bin/llm-dash.py, llm-dash.html  the web dashboard on :50080 (also on a single console)
   bin/llm-peerd.py              the peer daemon
   bin/llm-mode                  replaces Part 1's (auto mode, role from the YAML)
   bin/llm-sync                  rsync push to the other console
@@ -688,6 +764,7 @@ cluster/                      Part 2: the self-managing cluster
   src/rpc-cache-check.c         verifies the RPC weight cache
   systemd/                      llm-peer, ggml-rpc (firewall via drop-in), llm-config-watch, llm-config-sync (+ .timer), llm-models-sync, rpc-cache-check (+ .timer), llm-dash
   litellm/                      config.yaml, vision_router.py, litellm.service, env.example
+docs/screenshots/             the dashboard images in this README
 ```
 
 ## Credits

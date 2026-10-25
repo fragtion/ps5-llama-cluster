@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""A small web dashboard for the PS5 pair: http://<either console>:50080/
+"""A small web dashboard for one PS5 or the pair: http://<console>:50080/
 
 Each console samples itself every 5 s (temperature, CPU, memory, GPU memory, disk and network
-throughput, busy llama.cpp slots) and keeps 6 h of history in memory. The page asks the console it
-was opened on, which fetches the other console's data over the link, so either address shows both.
+throughput, busy llama.cpp slots) and keeps 6 h of history in memory. In a pair (a two-node
+/etc/llm-cluster.yaml), the page asks the console it was opened on, which fetches the other
+console's data over the link, so either address shows both. Without that file the console is shown
+on its own.
 
 The llama.cpp tab follows llama-server's logs (llama-pool.log, llama-server.log) for each request's
 prefill and decode timings, MTP draft acceptance and context size, and asks its /slots for what is
 running now. Nothing has to be restarted for it.
 
-Reading is open to the LAN. The buttons (fan, llama.cpp mode, model sync) need the gateway's
-LITELLM_MASTER_KEY from /etc/litellm/env; an action for the other console is passed on to it.
-Nothing here can reboot a console.
+Reading is open to the LAN. The buttons (fan, llama.cpp mode, model sync) need a key: LLM_DASH_KEY
+from /etc/default/llm-dash if it is set, otherwise the gateway's LITELLM_MASTER_KEY from
+/etc/litellm/env. An action for the other console is passed on to it. Nothing here can reboot a
+console.
 """
 import bisect
 import collections
@@ -30,13 +33,36 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import llm_cluster
+try:
+    import llm_cluster
+except ImportError:  # a console on its own needs neither it nor PyYAML
+    llm_cluster = None
 
-CLUSTER = llm_cluster.load()
-NODE = CLUSTER["self"]["name"]
-ROLE = CLUSTER["self"]["role"]
-PEER = CLUSTER["peer"]
-LINK_IF = CLUSTER["link"]["interface"]
+
+def cluster():
+    """The pair from /etc/llm-cluster.yaml, or None for a console on its own (no file, one node)."""
+    if llm_cluster is None:
+        return None
+    try:
+        return llm_cluster.load()
+    except (OSError, StopIteration, SystemExit):
+        return None
+
+
+def default_if():
+    """The interface of the default route: the one the LAN traffic goes through."""
+    m = re.search(r"\bdev (\S+)", subprocess.run(["ip", "route", "show", "default"],
+                                                  capture_output=True, text=True).stdout)
+    return m[1] if m else next((p.name for p in sorted(Path("/sys/class/net").iterdir()) if p.name != "lo"), "lo")
+
+
+CLUSTER = cluster()
+SINGLE = CLUSTER is None
+NODE = socket.gethostname() if SINGLE else CLUSTER["self"]["name"]
+ROLE = "standalone" if SINGLE else CLUSTER["self"]["role"]
+PEER = None if SINGLE else CLUSTER["peer"]
+# the network chart: the console-to-console link in a pair, the LAN otherwise
+LINK_IF = default_if() if SINGLE else CLUSTER["link"]["interface"]
 PORT = int(os.environ.get("PORT", "50080"))
 HERE = Path(__file__).resolve().parent
 GPU = Path("/sys/class/drm/card0/device")
@@ -46,10 +72,10 @@ INTERVAL = 5
 HISTORY = collections.deque(maxlen=6 * 3600 // INTERVAL)
 KEYS = ("t", "temp", "cpu", "load", "mem", "swap", "vram", "gtt",
         "disk_r", "disk_w", "link_rx", "link_tx", "wifi_rx", "wifi_tx", "busy")
-POOLED_UNIT = "llama-pool" if ROLE == "coordinator" else "ggml-rpc"
-POOLED_MODE = "pool" if ROLE == "coordinator" else "worker"
-UNITS = ("llm-peer", POOLED_UNIT, "llama-qwen", "litellm", "keepalived", "llm-config-watch",
-         "ps5fan", "ps5boost")
+POOLED_UNIT = None if SINGLE else "llama-pool" if ROLE == "coordinator" else "ggml-rpc"
+POOLED_MODE = None if SINGLE else "pool" if ROLE == "coordinator" else "worker"
+UNITS = (("llama-qwen", "litellm", "ps5fan", "ps5boost") if SINGLE else
+         ("llm-peer", POOLED_UNIT, "llama-qwen", "litellm", "keepalived", "llm-config-watch", "ps5fan", "ps5boost"))
 
 
 def read(path, default=""):
@@ -114,6 +140,7 @@ def sample(prev, now):
     net = lambda i, k: rate(now[3].get(i, (0, 0))[k], prev[3].get(i, (0, 0))[k])
     m = meminfo()
     s = slots()
+    track(s)
     row = {
         "t": int(time.time()),
         "temp": chip_temp(),
@@ -279,7 +306,21 @@ class LlamaLog:
 LOGS = {"llama-pool": LlamaLog("/root/logs/llama-pool.log", "pool"),
         "llama-qwen": LlamaLog("/root/logs/llama-server.log", "standalone")}
 SCRIPTS = {"llama-pool": "/root/bin/run-llama-pool.sh", "llama-qwen": "/root/bin/run-llama-standalone.sh"}
-_live = {}  # slot id -> (monotonic time, prompt tokens processed, tokens decoded, task), for the rates
+_live = {}  # slot id -> (monotonic time, tokens decoded, task, decode t/s since the read before)
+
+
+def track(s):
+    """Each slot's decode speed, from two /slots reads in a row. The sampler reads every 5 s too,
+    so a page's first request already gets one."""
+    now = time.monotonic()
+    for x in s or []:
+        decoded, task = (x.get("next_token") or [{}])[0].get("n_decoded", 0), x.get("id_task")
+        prev = _live.get(x["id"])
+        if prev and prev[2] == task and now - prev[0] < 0.5:
+            continue  # too soon after the last read: keep its rate
+        same = prev and prev[2] == task and x.get("is_processing") and decoded
+        tps = round((decoded - prev[1]) / (now - prev[0]), 1) if same else None
+        _live[x["id"]] = (now, decoded, task, tps)
 
 
 def log_follower():
@@ -364,7 +405,9 @@ def layout(service):
     if not model:
         return None
     path = model[1]
-    devices = ([PEER["name"]] if "--rpc" in text else []) + [NODE]
+    rpc = re.search(r"--rpc (\S+)", text)
+    worker = PEER["name"] if PEER else rpc[1] if rpc and re.fullmatch(r"[\w.-]+:\d+", rpc[1]) else "RPC worker"
+    devices = ([worker] if rpc else []) + [NODE]
     ts = re.search(r"-ts ([\d.,]+)", text)
     weights = [float(x) for x in ts[1].split(",")][:len(devices)] if ts else [1.0] * len(devices)
     total = sum(weights) or 1
@@ -406,19 +449,15 @@ def llama():
     active = next((svc for svc in LOGS if unit(svc) in ("active", "activating")), None)
     live = []
     s = slots()
-    now = time.monotonic()
+    track(s)
     for x in s or []:
-        nt = (x.get("next_token") or [{}])[0]
-        processed, decoded = x.get("n_prompt_tokens_processed", 0), nt.get("n_decoded", 0)
         # n_prompt_tokens is what the slot's cache holds so far (it grows a batch at a time while the
         # prompt is read, then with each token written), not the prompt's length
         row = {"slot": x["id"], "n_ctx": x.get("n_ctx"), "busy": x.get("is_processing"),
-               "task": x.get("id_task"), "tokens": x.get("n_prompt_tokens"), "decoded": decoded}
-        prev = _live.get(x["id"])
-        if not prev or prev[3] != row["task"] or now - prev[0] > 0.5:
-            if row["busy"] and prev and prev[3] == row["task"] and decoded:
-                row["decode_tps"] = round((decoded - prev[2]) / (now - prev[0]), 1)
-            _live[x["id"]] = (now, processed, decoded, row["task"])
+               "task": x.get("id_task"), "tokens": x.get("n_prompt_tokens"),
+               "decoded": (x.get("next_token") or [{}])[0].get("n_decoded", 0)}
+        if row["busy"] and x["id"] in _live:
+            row["decode_tps"] = _live[x["id"]][3]
         if row["busy"] and active:
             # the log has the prompt's length (tokens / fraction) and the prefill speed so far
             req = LOGS[active].open.get(row["task"])
@@ -431,15 +470,27 @@ def llama():
         lay = {"error": f"{type(e).__name__}: {e}"}
     if lay and "error" not in lay:
         lay["running"] = active is not None and lay["service"] == active
-    return {"node": NODE, "role": ROLE, "server": s is not None, "active": active,
+    return {"node": NODE, "role": ROLE, "single": SINGLE, "server": s is not None, "active": active,
             "model": LOGS[active].model if active else None, "live": live,
             "requests": reqs, "totals": totals, "layout": lay,
-            "worker": unit(POOLED_UNIT) == "active" and ROLE == "worker"}
+            "worker": ROLE == "worker" and unit(POOLED_UNIT) == "active"}
 
 
 def unit(u):
     return subprocess.run(["systemctl", "is-active", f"{u}.service"],
                           capture_output=True, text=True).stdout.strip()
+
+
+def units():
+    """The state of each of UNITS that is installed here."""
+    out = subprocess.run(["systemctl", "show", "-p", "Id,LoadState,ActiveState", *(f"{u}.service" for u in UNITS)],
+                         capture_output=True, text=True).stdout
+    found = {}
+    for block in out.split("\n\n"):
+        p = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if p.get("LoadState") == "loaded":
+            found[p["Id"].removesuffix(".service")] = p["ActiveState"]
+    return {u: found[u] for u in UNITS if u in found}
 
 
 _fan = {"at": 0.0, "target": None}
@@ -485,19 +536,22 @@ def rpc_cache():
 
 
 def info():
-    cfg = llm_cluster.load()  # the YAML may have changed since start
-    vip = str(cfg["gateway"]["vip"]).split("/")[0]
-    addrs = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout
+    cfg = None if SINGLE else cluster()  # the YAML may have changed since start
+    gateway = None
+    if cfg:
+        vip = str(cfg["gateway"]["vip"]).split("/")[0]
+        addrs = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True).stdout
+        gateway = {"vip": vip, "here": f" {vip}/" in addrs}
     s = slots()
     m = meminfo()
     return {
-        "node": NODE, "role": ROLE, "pooled_mode": POOLED_MODE,
+        "node": NODE, "role": ROLE, "single": SINGLE, "pooled_mode": POOLED_MODE, "net_if": LINK_IF,
         "uptime": int(float(read("/proc/uptime", "0").split()[0])),
-        "units": {u: unit(u) for u in UNITS},
-        "peerd": peerd(),
-        "gateway": {"vip": vip, "here": f" {vip}/" in addrs},
+        "units": units(),
+        "peerd": None if SINGLE else peerd(),
+        "gateway": gateway,
         "fan": fan(),
-        "models_sync": llm_cluster.get(cfg, "models.sync", "false") == "true",
+        "models_sync": llm_cluster.get(cfg, "models.sync", "false") == "true" if cfg else None,
         "cache_choice": read("/run/llm-cache-choice") or None,
         "rpc_cache": rpc_cache(),
         "disks": disks(),
@@ -520,7 +574,10 @@ def from_peer(path, body=None, headers=None, timeout=3):
         return json.load(r)
 
 
-def master_key():
+def action_key():
+    """LLM_DASH_KEY (set in /etc/default/llm-dash), or else the gateway's master key."""
+    if key := os.environ.get("LLM_DASH_KEY", "").strip():
+        return key
     m = re.search(r"^LITELLM_MASTER_KEY=(.*)$", read("/etc/litellm/env"), re.M)
     return m.group(1).strip().strip("'\"") if m else None
 
@@ -536,10 +593,11 @@ def run_action(action, value):
             return 400, "fan: auto, max, or a target of 40-95 °C"
         _fan["at"] = 0.0
     elif action == "mode":
-        if value not in ("auto", "standalone", "off", POOLED_MODE):
-            return 400, f"mode: auto, {POOLED_MODE}, standalone or off"
+        modes = ("standalone", "off") if SINGLE else ("auto", POOLED_MODE, "standalone", "off")
+        if value not in modes:
+            return 400, "mode: " + ", ".join(modes)
         cmd = ["/root/bin/llm-mode", value]
-    elif action == "models.sync":
+    elif action == "models.sync" and not SINGLE:
         if value not in ("true", "false"):
             return 400, "models.sync: true or false"
         cmd = ["/root/bin/llm-cluster", "set", "models.sync", value]
@@ -561,6 +619,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    @staticmethod
+    def both(mine, peer_path):
+        """This console's data, and in a pair the other one's."""
+        nodes = {NODE: mine}
+        if PEER:
+            try:
+                nodes[PEER["name"]] = from_peer(peer_path)
+            except Exception as e:
+                nodes[PEER["name"]] = {"error": f"unreachable ({type(e).__name__})"}
+        return {"self": NODE, "single": SINGLE, "nodes": nodes}
+
     def do_GET(self):
         path, _, query = self.path.partition("?")
         since = int(dict(p.split("=", 1) for p in query.split("&") if "=" in p).get("since", 0) or 0)
@@ -569,28 +638,18 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/self":
             self.reply(200, snapshot(since))
         elif path == "/api/nodes":
-            nodes = {NODE: snapshot(since)}
-            try:
-                nodes[PEER["name"]] = from_peer(f"/api/self?since={since}")
-            except Exception as e:
-                nodes[PEER["name"]] = {"error": f"unreachable ({type(e).__name__})"}
-            self.reply(200, {"self": NODE, "nodes": nodes})
+            self.reply(200, self.both(snapshot(since), f"/api/self?since={since}"))
         elif path == "/api/llama":
             self.reply(200, llama())
         elif path == "/api/llama-nodes":
-            nodes = {NODE: llama()}
-            try:
-                nodes[PEER["name"]] = from_peer("/api/llama")
-            except Exception as e:
-                nodes[PEER["name"]] = {"error": f"unreachable ({type(e).__name__})"}
-            self.reply(200, {"self": NODE, "nodes": nodes})
+            self.reply(200, self.both(llama(), "/api/llama"))
         else:
             self.reply(404, {"error": "not found"})
 
     def do_POST(self):
         if self.path != "/api/action":
             return self.reply(404, {"error": "not found"})
-        key = master_key()
+        key = action_key()
         given = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
         if not key or not hmac.compare_digest(given.encode(), key.encode()):
             return self.reply(403, {"error": "wrong key"})
@@ -599,6 +658,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self.reply(400, {"error": "bad JSON"})
         if req.get("node", NODE) != NODE:
+            if not PEER:
+                return self.reply(400, {"error": f"no console {req['node']!r} here"})
             try:
                 return self.reply(200, from_peer("/api/action", json.dumps(req | {"node": PEER["name"]}).encode(),
                                                  {"Authorization": f"Bearer {given}",
@@ -619,7 +680,8 @@ def main():
     threading.Thread(target=log_follower, daemon=True).start()
     ThreadingHTTPServer.allow_reuse_address = True
     ThreadingHTTPServer.daemon_threads = True
-    print(time.strftime("%F %T"), f"{NODE}: dashboard on :{PORT}", flush=True)
+    print(time.strftime("%F %T"), f"{NODE}: dashboard on :{PORT}, "
+          + ("one console" if SINGLE else f"paired with {PEER['name']}"), flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

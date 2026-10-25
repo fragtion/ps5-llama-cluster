@@ -8,3 +8,6 @@ Restart=on-failure
 RestartSec=15
 StandardOutput=append:/root/logs/llama-server.log
 StandardError=append:/root/logs/llama-server.log
+
+[Install]
+WantedBy=multi-user.target

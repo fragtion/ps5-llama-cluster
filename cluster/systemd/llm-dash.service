@@ -1,9 +1,11 @@
 [Unit]
-Description=Web dashboard for the PS5 pair (:50080)
+Description=Web dashboard for the PS5 or the pair (:50080)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+# optional: LLM_DASH_KEY=<key for the buttons>; without it they take the gateway's master key
+EnvironmentFile=-/etc/default/llm-dash
 ExecStart=/usr/bin/python3 /root/bin/llm-dash.py
 Restart=always
 RestartSec=10

@@ -83,6 +83,9 @@ table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-nu
 th, td { padding: 5px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 600; font-size: 12px; }
 th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+.single .node-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
+.single #requests th:nth-child(2), .single #requests td:nth-child(2) { display: none; }
+@media (max-width: 760px) { .single .node-body { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -104,7 +107,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
     <div class="charts" id="llama-charts"></div>
     <div class="card" style="margin-top:14px">
       <h2>Recent requests</h2>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table id="requests">
         <thead><tr><th>Finished</th><th>Console</th><th>Prompt</th><th>Reused</th><th>New</th><th>Output</th>
           <th>Prefill t/s</th><th>Decode t/s</th><th>Drafts accepted</th><th>Took</th><th>Context</th></tr></thead>
         <tbody id="req-rows"></tbody>
@@ -120,7 +123,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
   <div id="tab-overview">
   <div class="grid" id="nodes"></div>
 
-  <div class="card" style="margin-top:14px">
+  <div class="card" style="margin-top:14px" id="synccard" hidden>
     <div class="node-head"><h2 style="margin:0">Model sync</h2><span id="syncstate" class="pill"></span>
       <span class="spacer"></span><button id="syncbtn" disabled>…</button></div>
     <p class="warnbox" style="margin:10px 0 0">
@@ -133,7 +136,8 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
   <div class="charts" id="charts"></div>
   <p class="muted" style="font-size:12px;margin-top:14px">Each console keeps 6 h of samples (every 5 s) in memory; a
     restart of <code>llm-dash</code> clears them. The temperature is the chip's CPU-side sensor: Linux sees no GPU temperature
-    and no fan speed. Buttons need the gateway's master key and act on the console they're under.</p>
+    and no fan speed. Buttons need the dashboard's key (<code>LLM_DASH_KEY</code> in <code>/etc/default/llm-dash</code>,
+    or else the gateway's master key) and act on the console they're under.</p>
   </div>
 </main>
 <div id="toast"></div>
@@ -142,7 +146,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
 const COLORS = () => { const s = getComputedStyle(document.documentElement);
   return { a: s.getPropertyValue("--a").trim(), b: s.getPropertyValue("--b").trim(),
            line: s.getPropertyValue("--line").trim(), muted: s.getPropertyValue("--muted").trim() }; };
-const state = { self: null, nodes: {}, order: [], hist: {}, last: {}, range: 3600 };
+const state = { self: null, single: false, nodes: {}, order: [], hist: {}, last: {}, range: 3600 };
 const CHARTS = [
   { id: "temp", title: "Chip temperature", unit: "°C", series: [["temp", ""]], min: 40, max: 100, fixed: false },
   { id: "cpu", title: "CPU", unit: "%", series: [["cpu", ""]], min: 0, max: 100, fixed: true },
@@ -155,6 +159,7 @@ const CHARTS = [
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const gb = b => (b / 1e9).toFixed(1) + " GB";
+const KEY_PROMPT = "Dashboard key (LLM_DASH_KEY in /etc/default/llm-dash, or else LITELLM_MASTER_KEY in /etc/litellm/env):";
 const getKey = () => { try { return localStorage.getItem("llmdash-key") || ""; } catch { return ""; } };
 const setKey = k => { try { k ? localStorage.setItem("llmdash-key", k) : localStorage.removeItem("llmdash-key"); } catch {} };
 function toast(msg, ms = 4000) { const t = $("#toast"); t.textContent = msg; t.style.display = "block";
@@ -169,6 +174,7 @@ async function poll() {
     const r = await fetch(`/api/nodes?since=${isFinite(since) ? since : 0}`, { cache: "no-store" });
     const j = await r.json();
     state.self = j.self;
+    setShape(j.single);
     const names = Object.keys(j.nodes).sort();
     state.order = names;
     for (const n of names) {
@@ -188,10 +194,18 @@ async function poll() {
   } catch (e) { $("#sub").textContent = "can't reach this console: " + e.message; }
 }
 
+// one console or the pair: the title, and which parts of the page apply
+function setShape(single) {
+  state.single = !!single;
+  document.body.classList.toggle("single", state.single);
+  document.title = $("h1").textContent = state.single ? "PS5 LLM" : "PS5 Pool";
+  $("#synccard").hidden = state.single;
+}
+
 async function act(node, action, value, confirmText) {
   if (confirmText && !confirm(confirmText)) return;
   let key = getKey();
-  if (!key) { key = prompt("Gateway master key (LITELLM_MASTER_KEY in /etc/litellm/env):") || ""; if (!key) return; setKey(key); }
+  if (!key) { key = (prompt(KEY_PROMPT) || "").trim(); if (!key) return; setKey(key); }
   toast(`${node}: ${action} ${value}…`, 60000);
   try {
     const r = await fetch("/api/action", { method: "POST",
@@ -220,24 +234,30 @@ function renderNode(name) {
     <h2 style="margin:0">${esc(name)}</h2><span class="pill bad">${esc(d ? d.error : "no data")}</span></div>
     <p class="muted">History from before it went away stays on the charts.</p></div>`;
   const i = d.info, h = state.hist[name] || [], now = h[h.length - 1] || {};
-  const p = i.peerd, mode = p ? p.mode : (i.units["llm-peer"] === "active" ? "starting" : "manual");
-  const auto = i.units["llm-peer"] === "active";
+  const p = i.peerd, auto = i.units["llm-peer"] === "active";
+  let mode = p ? p.mode : auto ? "starting" : "manual", ready = !!(p && p.ready), how = auto ? "automatic" : "manual";
+  if (i.single) {  // one console: llama-qwen runs or it doesn't
+    const u = i.units["llama-qwen"];
+    mode = u === "active" || i.slots ? "on" : u === "activating" ? "starting" : "off";
+    ready = !!i.slots; how = "standalone";
+  }
   const fanMode = i.fan.mode, tgt = i.fan.target;
   const disk = i.disks.map(x => bar(x.path === "/" ? "disk /" : "cache drive", x.used, x.total)).join("");
   const slots = i.slots ? `${i.slots.filter(s => s.busy).length} of ${i.slots.length} busy · ${i.slots[0].n_ctx.toLocaleString()} ctx` : "no llama-server";
-  const cache = i.models_sync ? "none (model sync is on)" : i.cache_choice || (i.rpc_cache != null ? gb(i.rpc_cache) + " in /root/.cache/llama.cpp/rpc" : "none here");
-  const modeBtn = (v, label, warn) => `<button class="${(!auto && mode === v) || (v === "auto" && auto) ? "on" : ""}"
+  const cache = i.single ? null : i.models_sync ? "none (model sync is on)" : i.cache_choice || (i.rpc_cache != null ? gb(i.rpc_cache) + " in /root/.cache/llama.cpp/rpc" : "none here");
+  const modeBtn = (v, label, warn, on = (!auto && mode === v) || (v === "auto" && auto)) => `<button class="${on ? "on" : ""}"
     onclick="act('${name}','mode','${v}',${warn ? `'${warn}'` : "null"})">${label}</button>`;
   return `<div class="card">
     <div class="node-head"><span class="dot" style="background:${nodeColor(name)}"></span>
-      <h2 style="margin:0">${esc(name)}</h2><span class="muted">${esc(i.role)} · up ${dur(i.uptime)}</span>
-      ${i.gateway.here ? `<span class="pill ok" title="holds ${esc(i.gateway.vip)}">gateway</span>` : ""}</div>
+      <h2 style="margin:0">${esc(name)}</h2><span class="muted">${i.single ? "one console" : esc(i.role)} · up ${dur(i.uptime)}</span>
+      ${i.gateway && i.gateway.here ? `<span class="pill ok" title="holds ${esc(i.gateway.vip)}">gateway</span>` : ""}</div>
     <div class="row" style="margin-top:10px;gap:18px;align-items:flex-end">
       <div><div class="big">${now.temp != null ? Math.round(now.temp) + "°" : "–"}</div><div class="muted">chip</div></div>
       <div><div class="big" style="font-size:22px">${tgt ?? "–"}°</div><div class="muted">fan target · ${esc(fanMode)}</div></div>
-      <div><div class="big" style="font-size:22px">${esc(mode)}${p && p.ready ? "" : p ? " …" : ""}</div>
-        <div class="muted">${auto ? "automatic" : "manual"} · ${p && p.ready ? "ready" : "not ready"}</div></div>
+      <div><div class="big" style="font-size:22px">${esc(mode)}${ready || mode === "off" || !p && !i.single ? "" : " …"}</div>
+        <div class="muted">llama.cpp · ${how} · ${ready ? "ready" : "not ready"}</div></div>
     </div>
+    <div class="node-body"><div>
     <h3>Fan</h3>
     <div class="row">
       <button class="${fanMode === "auto" && tgt === i.fan.boot_target || fanMode === "auto" && !i.fan.boot_target ? "on" : ""}" onclick="act('${name}','fan','auto')">Auto</button>
@@ -246,32 +266,38 @@ function renderNode(name) {
       <button onclick="act('${name}','fan',document.getElementById('tgt-${name}').value)">Set</button>
     </div>
     <h3>llama.cpp</h3>
-    <div class="row">${modeBtn("auto", "Auto")}${modeBtn(i.pooled_mode, i.pooled_mode === "pool" ? "Pool" : "Worker",
-        "Manual mode stops the automatic daemon on " + name + ". Continue?")}${modeBtn("standalone", "Standalone",
-        "Manual mode stops the automatic daemon on " + name + ". Continue?")}${modeBtn("off", "Off",
+    <div class="row">${i.single
+      ? modeBtn("standalone", "On", null, mode !== "off") + modeBtn("off", "Off",
+        "Stop llama.cpp on " + name + "? Requests to it will fail until you turn it on again.")
+      : modeBtn("auto", "Auto") + modeBtn(i.pooled_mode, i.pooled_mode === "pool" ? "Pool" : "Worker",
+        "Manual mode stops the automatic daemon on " + name + ". Continue?") + modeBtn("standalone", "Standalone",
+        "Manual mode stops the automatic daemon on " + name + ". Continue?") + modeBtn("off", "Off",
         "Stop llama.cpp on " + name + "? Requests to it will fail until you pick another mode.")}</div>
-    <div class="muted" style="margin-top:6px;font-size:13px">slots: ${slots} · weight cache: ${esc(cache)}</div>
+    <div class="muted" style="margin-top:6px;font-size:13px">slots: ${slots}${cache ? " · weight cache: " + esc(cache) : ""}</div>
+    <h3>Services</h3>
+    <div class="row">${Object.entries(i.units).map(([u, s]) => unitPill(u, s)).join("")}</div>
+    </div><div>
     <h3>Memory and disk</h3>
     <div class="kv">${bar("RAM", i.mem_total * (now.mem ?? 0) / 100, i.mem_total)}
       ${bar("swap", (now.swap ?? 0) * 2 ** 20, i.swap_total, 0.5)}
       ${bar("GPU VRAM", (now.vram ?? 0) * 2 ** 20, i.vram_total, 1.1)}
       ${bar("GPU GTT", (now.gtt ?? 0) * 2 ** 20, i.gtt_total)}${disk}</div>
-    <h3>Services</h3>
-    <div class="row">${Object.entries(i.units).map(([u, s]) => unitPill(u, s)).join("")}</div>
     <h3>Models</h3>
     <div class="models">${i.models.map(m => `${esc(m.name)} · ${gb(m.size)}`).join("<br>") || "none"}</div>
-  </div>`;
+  </div></div></div>`;
 }
 
 function render() {
   const live = state.order.filter(n => !state.nodes[n].error);
-  const gw = live.find(n => state.nodes[n].info.gateway.here);
-  $("#sub").textContent = `viewing via ${state.self} · gateway on ${gw || "neither"} · updated ${new Date().toLocaleTimeString()}`;
+  const gw = live.find(n => (state.nodes[n].info.gateway || {}).here);
+  $("#sub").textContent = (state.single ? state.self : `viewing via ${state.self} · gateway on ${gw || "neither"}`)
+    + ` · updated ${new Date().toLocaleTimeString()}`;
   // don't re-render a card while its target box is being typed in
   const focused = document.activeElement && document.activeElement.id && document.activeElement.id.startsWith("tgt-");
   if (!focused) $("#nodes").innerHTML = state.order.map(renderNode).join("");
   const any = live[0] && state.nodes[live[0]].info;
-  if (any) {
+  $("#ct-link").textContent = any && state.single ? `Network (${any.net_if})` : CHARTS.find(c => c.id === "link").title;
+  if (any && !state.single) {
     $("#syncstate").textContent = any.models_sync ? "on" : "off";
     $("#syncstate").className = "pill " + (any.models_sync ? "ok" : "");
     const b = $("#syncbtn"); b.disabled = false;
@@ -284,7 +310,7 @@ function render() {
 }
 
 function setupCharts(box, list) {
-  $(box).innerHTML = list.map(c => `<div class="card"><div class="chart-head"><h2 style="margin:0">${c.title}</h2>
+  $(box).innerHTML = list.map(c => `<div class="card"><div class="chart-head"><h2 style="margin:0" id="ct-${c.id}">${c.title}</h2>
     <span class="readout" id="ro-${c.id}"></span></div><canvas id="cv-${c.id}"></canvas></div>`).join("");
   for (const c of list) {
     const cv = $("#cv-" + c.id);
@@ -305,8 +331,10 @@ function drawChart(c) {
   let lines = [];
   if (c.lines) {  // per-request charts span the requests they have
     lines = c.lines();
-    const first = Math.min(...lines.flatMap(l => l.pts.map(p => p[0])));
+    // from the first request of the last 6 h
+    const first = Math.min(...lines.flatMap(l => l.pts.map(p => p[0])).filter(t => t >= t1 - 6 * 3600));
     t0 = isFinite(first) ? Math.min(first - 60, t1 - 900) : t1 - 3600;
+    for (const l of lines) l.pts = l.pts.filter(p => p[0] >= t0);
   } else for (const n of state.order) {
     const h = (state.hist[n] || []).filter(p => p.t >= t0);
     c.series.forEach(([k, label], si) => lines.push({ n, k, label, dash: si > 0, pts: h.filter(p => p[k] != null).map(p => [p.t, p[k]]) }));
@@ -355,7 +383,9 @@ function drawChart(c) {
   ro.innerHTML = lines.map(l => {
     let p = l.pts[l.pts.length - 1];
     if (at != null) p = l.pts.reduce((b, q) => !b || Math.abs(q[0] - at) < Math.abs(b[0] - at) ? q : b, null);
-    return p ? `<span style="color:${nodeColor(l.n)}">${l.n}${l.label ? " " + l.label : ""} ${fmt(p[1])}${/^[°%]/.test(c.unit) ? "" : " "}${c.unit}</span>` : "";
+    if (!p) return "";
+    const v = fmt(p[1]) + (/^[°%]/.test(c.unit) ? "" : " ") + c.unit;
+    return `<span style="color:${nodeColor(l.n)}">${[state.single ? "" : l.n, l.label, v].filter(Boolean).join(" ")}</span>`;
   }).filter(Boolean).join(" · ") + (at != null ? ` <span>@ ${new Date(at * 1000).toTimeString().slice(0, 8)}</span>` : "");
 }
 const niceMax = v => { if (v <= 0) return 1; const p = 10 ** Math.floor(Math.log10(v)); return [1, 2, 5, 10].map(m => m * p).find(m => m >= v); };
@@ -378,6 +408,7 @@ async function pollLlama() {
   try {
     const j = await (await fetch("/api/llama-nodes", { cache: "no-store" })).json();
     llama.nodes = j.nodes; llama.order = Object.keys(j.nodes).sort();
+    setShape(j.single);
     if (!state.order.length) state.order = llama.order;
     renderLlama();
   } catch (e) { $("#sub").textContent = "can't reach this console: " + e.message; }
@@ -398,7 +429,7 @@ function renderLlamaNode(name) {
   const st = slotState(d), reqs = (d.requests || []).filter(r => !r.cancelled), last = reqs[reqs.length - 1];
   const mode = d.active ? (d.active === "llama-pool" ? "pool" : "standalone") : last ? last.mode : null;
   const t = (mode && d.totals[mode]) || { requests: 0 }, slots = d.live || [];
-  let live = `<div class="muted" style="margin-top:6px">${last ? `last request ${new Date(last.end * 1000).toLocaleTimeString()}` : "no requests yet"}</div>`;
+  let live = `<div class="muted" style="margin-top:6px">${last ? `last request ${when(last.end)}` : "no requests yet"}</div>`;
   if (st.s) {
     const s = st.s, lp = s.log_progress;
     if (st.cls === "reading") {
@@ -462,7 +493,7 @@ function renderLlama() {
   const rows = llama.order.flatMap(n => ((llama.nodes[n] || {}).requests || []).map(r => ({ ...r, n })))
     .sort((a, b) => b.end - a.end).slice(0, 40);
   $("#req-rows").innerHTML = rows.map(r => `<tr>
-    <td>${new Date(r.end * 1000).toLocaleTimeString()}</td>
+    <td>${when(r.end)}</td>
     <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${nodeColor(r.n)};margin-right:6px"></span>${esc(r.n)}${r.mode === "pool" ? " (pool)" : ""}</td>
     ${r.cancelled ? `<td colspan="8" class="muted" style="text-align:center">stopped before it finished</td><td>${n0(r.ctx)}</td>` : `
     <td>${n0(r.prompt)}</td><td>${n0(r.reused)}</td><td>${n0(r.prefill_tokens)}</td><td>${n0(r.decode_tokens)}</td>
@@ -472,6 +503,9 @@ function renderLlama() {
   for (const c of LLAMA_CHARTS) drawChart(c);
 }
 const took = s => s < 60 ? s.toFixed(1) + " s" : dur(s);
+// a time today, with the date before that
+const when = t => { const d = new Date(t * 1000);
+  return (d.toDateString() === new Date().toDateString() ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ", ") + d.toLocaleTimeString(); };
 
 function showTab(t) {
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
@@ -484,7 +518,7 @@ function showTab(t) {
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => showTab(b.dataset.t);
 
 function updateKeyBtn() { $("#keybtn").textContent = getKey() ? "Forget key" : "Set key"; }
-$("#keybtn").onclick = () => { if (getKey()) setKey(""); else { const k = prompt("Gateway master key:"); if (k) setKey(k.trim()); } updateKeyBtn(); };
+$("#keybtn").onclick = () => { if (getKey()) setKey(""); else { const k = prompt(KEY_PROMPT); if (k) setKey(k.trim()); } updateKeyBtn(); };
 for (const b of document.querySelectorAll("#range button")) b.onclick = () => {
   state.range = +b.dataset.r; document.querySelectorAll("#range button").forEach(x => x.classList.toggle("on", x === b)); drawCharts(); };
 window.addEventListener("resize", drawCharts);

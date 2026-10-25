@@ -15,3 +15,6 @@ IPAddressDeny=any
 IPAddressAllow=192.168.1.50 localhost
 StandardOutput=append:/root/logs/ggml-rpc.log
 StandardError=append:/root/logs/ggml-rpc.log
+
+[Install]
+WantedBy=multi-user.target
