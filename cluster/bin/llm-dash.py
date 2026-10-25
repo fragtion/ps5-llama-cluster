@@ -5,10 +5,15 @@ Each console samples itself every 5 s (temperature, CPU, memory, GPU memory, dis
 throughput, busy llama.cpp slots) and keeps 6 h of history in memory. The page asks the console it
 was opened on, which fetches the other console's data over the link, so either address shows both.
 
+The llama.cpp tab follows llama-server's logs (llama-pool.log, llama-server.log) for each request's
+prefill and decode timings, MTP draft acceptance and context size, and asks its /slots for what is
+running now. Nothing has to be restarted for it.
+
 Reading is open to the LAN. The buttons (fan, llama.cpp mode, model sync) need the gateway's
 LITELLM_MASTER_KEY from /etc/litellm/env; an action for the other console is passed on to it.
 Nothing here can reboot a console.
 """
+import bisect
 import collections
 import hmac
 import json
@@ -16,6 +21,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -136,6 +142,299 @@ def collector():
         except Exception as e:  # one bad read mustn't stop the history
             print(time.strftime("%F %T"), "sample failed:", e, flush=True)
         prev = now
+
+
+# llama-server log lines: "<min>.<sec>.<ms>.<us> I slot <fn>: id  0 | task 12 | <text>", the time
+# counted from the server's start, sometimes after a "[pid] " prefix
+LOG_LINE = re.compile(r"^(?:\[\d+\] )?(\d+)\.(\d+)\.(\d+)\.(\d+) \w (.*)$")
+TASK = re.compile(r"slot +\w+: id +(\d+) \| task (\d+) \| (.*)$")
+NUM = r"([\d.]+)"
+PATTERNS = {
+    "launch": re.compile(r"processing task, is_child = (\d)"),
+    "progress": re.compile(rf"prompt processing, n_tokens = +(\d+), progress = {NUM}, t = +{NUM} s / +{NUM} tokens per second"),
+    "prefill": re.compile(rf"prompt eval time = +{NUM} ms / +(\d+) tokens"),
+    "decode": re.compile(rf"^ *eval time = +{NUM} ms / +(\d+) tokens"),
+    "draft": re.compile(rf"draft acceptance = {NUM} \( *(\d+) accepted / +(\d+) generated\), mean len = +{NUM}"),
+    "release": re.compile(r"stop processing: n_tokens = (\d+), truncated = (\d)"),
+}
+MODEL = re.compile(r"loading model '([^']+)'")
+
+
+class LlamaLog:
+    """Follows one llama-server log and turns it into finished requests.
+
+    A server run's times count from its start, and a new run starts again from zero. Lines read as
+    they arrive are dated by the clock; when catching up at start, the newest run is dated by the
+    file's last write (its last line). Older runs in the file can't be dated and are skipped.
+    """
+
+    def __init__(self, path, mode):
+        self.path, self.mode = Path(path), mode
+        self.offset, self.rest, self.last_rel = 0, "", 0.0
+        self.base = None    # wall time of this run's start
+        self.model = None
+        self.open = {}      # task -> request in progress
+        self.done = collections.deque(maxlen=200)
+
+    def catch_up(self):
+        try:
+            st = self.path.stat()
+        except OSError:
+            return
+        start = max(st.st_size - 8 * 2**20, 0)  # the last 8 MB is plenty
+        with open(self.path, "rb") as f:
+            f.seek(start)
+            lines = f.read(st.st_size - start).decode("utf-8", "replace").split("\n")
+        self.offset, self.rest = st.st_size, lines.pop()
+        rels = [(i, rel) for i, l in enumerate(lines) if (rel := self.rel(l)) is not None]
+        if not rels:
+            return
+        first = 0  # the newest run begins after the last time the clock went back
+        for (_, prev), (i, rel) in zip(rels, rels[1:]):
+            if rel + 1 < prev:
+                first = i
+        self.base = st.st_mtime - rels[-1][1]
+        for line in lines[first:]:
+            self.line(line)
+
+    def poll(self):
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return
+        if size < self.offset:  # truncated or replaced
+            self.offset, self.rest, self.last_rel = 0, "", 0.0
+        if size == self.offset:
+            return
+        with open(self.path, "rb") as f:
+            f.seek(self.offset)
+            data = f.read(size - self.offset)
+        self.offset = size
+        lines = (self.rest + data.decode("utf-8", "replace")).split("\n")
+        self.rest = lines.pop()
+        for line in lines:
+            self.line(line, live=True)
+
+    @staticmethod
+    def rel(line):
+        m = LOG_LINE.match(line)
+        return int(m[1]) * 60 + int(m[2]) + int(m[3]) / 1e3 + int(m[4]) / 1e6 if m else None
+
+    def line(self, line, live=False):
+        m = LOG_LINE.match(line)
+        if not m:
+            return
+        rel = self.rel(line)
+        if rel + 1 < self.last_rel or self.base is None:  # a new run
+            self.open.clear()
+            self.model = None if self.base is not None else self.model
+            self.base = time.time() - rel
+        elif live and abs(self.base + rel - time.time()) > 5:
+            self.base = time.time() - rel  # keep up with clock jumps (NTP after boot)
+        self.last_rel = rel
+        body = m[5]
+        if mm := MODEL.search(body):
+            self.model = Path(mm[1]).name.removesuffix(".gguf")
+            return
+        tm = TASK.search(body)
+        if not tm:
+            return
+        slot, task, text = int(tm[1]), int(tm[2]), tm[3]
+        at = self.base + rel
+        if pm := PATTERNS["launch"].search(text):
+            self.open[task] = {"task": task, "slot": slot, "start": at, "child": pm[1] == "1",
+                               "mode": self.mode, "model": self.model}
+            return
+        req = self.open.get(task)
+        if req is None:
+            return
+        if pm := PATTERNS["progress"].search(text):
+            req["progress"] = {"tokens": int(pm[1]), "fraction": float(pm[2]), "tps": float(pm[4])}
+        elif pm := PATTERNS["prefill"].search(text):
+            req.update(prefill_ms=float(pm[1]), prefill_tokens=int(pm[2]))
+        elif pm := PATTERNS["decode"].search(text):
+            req.update(decode_ms=float(pm[1]), decode_tokens=int(pm[2]))
+        elif pm := PATTERNS["draft"].search(text):
+            req.update(draft_rate=float(pm[1]), draft_accepted=int(pm[2]), draft_generated=int(pm[3]),
+                       draft_len=float(pm[4]))
+        elif pm := PATTERNS["release"].search(text):
+            del self.open[task]
+            req.update(end=at, ctx=int(pm[1]), truncated=pm[2] == "1")
+            req.pop("progress", None)
+            if "prefill_ms" not in req:  # stopped before it finished: the log has no timings
+                req["cancelled"] = True
+                self.done.append(req)
+                return
+            new, out = req.get("prefill_tokens", 0), req.get("decode_tokens", 0)
+            req["prompt"] = max(req["ctx"] - out, new)
+            req["reused"] = req["prompt"] - new
+            if req.get("prefill_ms"):
+                req["prefill_tps"] = round(new / req["prefill_ms"] * 1000, 1)
+            if req.get("decode_ms"):
+                req["decode_tps"] = round(out / req["decode_ms"] * 1000, 2)
+            self.done.append(req)
+
+
+# the units' logs; the run scripts hold the model and how it is split
+LOGS = {"llama-pool": LlamaLog("/root/logs/llama-pool.log", "pool"),
+        "llama-qwen": LlamaLog("/root/logs/llama-server.log", "standalone")}
+SCRIPTS = {"llama-pool": "/root/bin/run-llama-pool.sh", "llama-qwen": "/root/bin/run-llama-standalone.sh"}
+_live = {}  # slot id -> (monotonic time, prompt tokens processed, tokens decoded, task), for the rates
+
+
+def log_follower():
+    for log in LOGS.values():
+        log.catch_up()
+    while True:
+        for log in LOGS.values():
+            try:
+                log.poll()
+            except Exception as e:
+                print(time.strftime("%F %T"), f"{log.path}: {e}", flush=True)
+        time.sleep(1)
+
+
+_gguf = {}
+
+
+def gguf_layers(path):
+    """Bytes per block, the input and output tensors and the MTP layer count, from a GGUF header."""
+    st = os.stat(path)
+    if (path, st.st_mtime) in _gguf:
+        return _gguf[(path, st.st_mtime)]
+    with open(path, "rb") as f:
+        rd = lambda fmt: struct.unpack("<" + fmt, f.read(struct.calcsize("<" + fmt)))[0]
+        rstr = lambda: f.read(rd("Q")).decode("utf-8", "replace")
+        scalar = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
+
+        def value(t):
+            if t == 8:
+                return rstr()
+            if t == 9:  # arrays aren't needed: skip them
+                et, n = rd("I"), rd("Q")
+                if et in scalar:
+                    f.seek(n * struct.calcsize(scalar[et]), 1)
+                else:
+                    for _ in range(n):
+                        value(et)
+                return None
+            return rd(scalar[t])
+
+        if f.read(4) != b"GGUF":
+            raise ValueError(f"{path} is not a GGUF file")
+        rd("I")
+        n_tensors, n_kv = rd("Q"), rd("Q")
+        meta = {}
+        for _ in range(n_kv):
+            k = rstr()
+            meta[k] = value(rd("I"))
+        tensors = []
+        for _ in range(n_tensors):
+            name = rstr()
+            f.seek(8 * rd("I"), 1)  # dimensions
+            rd("I")                 # type
+            tensors.append((rd("Q"), name))
+        align = meta.get("general.alignment") or 32
+        data = (f.tell() + align - 1) // align * align
+    # each tensor runs to the next one's start (padding included), the last one to the end of the file
+    tensors.sort()
+    ends = [o for o, _ in tensors[1:]] + [st.st_size - data]
+    blocks, inp, out = collections.Counter(), 0, 0
+    for (off, name), end in zip(tensors, ends):
+        if m := re.match(r"blk\.(\d+)\.", name):
+            blocks[int(m[1])] += end - off
+        elif name.startswith("token_embd"):
+            inp += end - off
+        else:
+            out += end - off
+    nextn = next((v for k, v in meta.items() if k.endswith(".nextn_predict_layers")), 0) or 0
+    result = {"blocks": [blocks[i] for i in range(max(blocks) + 1)], "input": inp, "output": out,
+              "nextn": nextn}
+    _gguf[(path, st.st_mtime)] = result
+    return result
+
+
+def layout(service):
+    """Which device holds each layer, worked out the way llama.cpp's loader does it
+    (llama-model.cpp): RPC devices come first, then this console's GPU; with -ts the layers are cut
+    at the cumulative split points over n_layer + 1 (the +1 is the output layer); the input
+    embedding always stays in host RAM."""
+    text = read(SCRIPTS[service])
+    model = re.search(r"-m (\S+)", text)
+    if not model:
+        return None
+    path = model[1]
+    devices = ([PEER["name"]] if "--rpc" in text else []) + [NODE]
+    ts = re.search(r"-ts ([\d.,]+)", text)
+    weights = [float(x) for x in ts[1].split(",")][:len(devices)] if ts else [1.0] * len(devices)
+    total = sum(weights) or 1
+    splits = [sum(weights[:i + 1]) / total for i in range(len(devices))]
+    g = gguf_layers(path)
+    n = len(g["blocks"])
+    ngl = int(m[1]) if (m := re.search(r"-ngl (\d+)", text)) else 0
+    gpu_start, gpu_layers = max(n + 1 - ngl, 0), min(ngl, n + 1)
+
+    def device(il):
+        if il < gpu_start or il - gpu_start >= gpu_layers:
+            return f"{NODE} RAM"
+        return devices[min(bisect.bisect_right(splits, (il - gpu_start) / gpu_layers), len(devices) - 1)]
+
+    layers = [{"dev": device(il), "bytes": b, "mtp": il >= n - g["nextn"]} for il, b in enumerate(g["blocks"])]
+    parts = {"input": {"dev": f"{NODE} RAM", "bytes": g["input"]},
+             "output": {"dev": device(n), "bytes": g["output"]}}
+    if mm := re.search(r"--mmproj (\S+)", text):
+        parts["vision"] = {"dev": NODE, "bytes": os.path.getsize(mm[1]) if os.path.exists(mm[1]) else 0}
+    per_device = collections.Counter()
+    for x in layers + list(parts.values()):
+        per_device[x["dev"]] += x["bytes"]
+    return {"service": service, "model": Path(path).name.removesuffix(".gguf"), "devices": devices,
+            "split": weights if ts else None, "layers": layers, "parts": parts,
+            "per_device": dict(per_device)}
+
+
+def llama():
+    """Requests from the logs, totals, what each slot is doing now, and the layer map."""
+    reqs = sorted((r for log in LOGS.values() for r in log.done), key=lambda r: r["end"])[-100:]
+    keys = ("prefill_tokens", "prefill_ms", "decode_tokens", "decode_ms", "draft_accepted",
+            "draft_generated", "reused")
+    totals = {}  # per mode: pooled and standalone speeds aren't comparable
+    for r in reqs:
+        t = totals.setdefault(r["mode"], dict.fromkeys(keys, 0) | {"requests": 0})
+        t["requests"] += 1
+        for k in keys:
+            t[k] += r.get(k) or 0
+    active = next((svc for svc in LOGS if unit(svc) in ("active", "activating")), None)
+    live = []
+    s = slots()
+    now = time.monotonic()
+    for x in s or []:
+        nt = (x.get("next_token") or [{}])[0]
+        processed, decoded = x.get("n_prompt_tokens_processed", 0), nt.get("n_decoded", 0)
+        # n_prompt_tokens is what the slot's cache holds so far (it grows a batch at a time while the
+        # prompt is read, then with each token written), not the prompt's length
+        row = {"slot": x["id"], "n_ctx": x.get("n_ctx"), "busy": x.get("is_processing"),
+               "task": x.get("id_task"), "tokens": x.get("n_prompt_tokens"), "decoded": decoded}
+        prev = _live.get(x["id"])
+        if not prev or prev[3] != row["task"] or now - prev[0] > 0.5:
+            if row["busy"] and prev and prev[3] == row["task"] and decoded:
+                row["decode_tps"] = round((decoded - prev[2]) / (now - prev[0]), 1)
+            _live[x["id"]] = (now, processed, decoded, row["task"])
+        if row["busy"] and active:
+            # the log has the prompt's length (tokens / fraction) and the prefill speed so far
+            req = LOGS[active].open.get(row["task"])
+            if req:
+                row["log_progress"] = req.get("progress")
+        live.append(row)
+    try:
+        lay = layout(active or ("llama-pool" if ROLE == "coordinator" else "llama-qwen"))
+    except Exception as e:
+        lay = {"error": f"{type(e).__name__}: {e}"}
+    if lay and "error" not in lay:
+        lay["running"] = active is not None and lay["service"] == active
+    return {"node": NODE, "role": ROLE, "server": s is not None, "active": active,
+            "model": LOGS[active].model if active else None, "live": live,
+            "requests": reqs, "totals": totals, "layout": lay,
+            "worker": unit(POOLED_UNIT) == "active" and ROLE == "worker"}
 
 
 def unit(u):
@@ -276,6 +575,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 nodes[PEER["name"]] = {"error": f"unreachable ({type(e).__name__})"}
             self.reply(200, {"self": NODE, "nodes": nodes})
+        elif path == "/api/llama":
+            self.reply(200, llama())
+        elif path == "/api/llama-nodes":
+            nodes = {NODE: llama()}
+            try:
+                nodes[PEER["name"]] = from_peer("/api/llama")
+            except Exception as e:
+                nodes[PEER["name"]] = {"error": f"unreachable ({type(e).__name__})"}
+            self.reply(200, {"self": NODE, "nodes": nodes})
         else:
             self.reply(404, {"error": "not found"})
 
@@ -308,6 +616,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     threading.Thread(target=collector, daemon=True).start()
+    threading.Thread(target=log_follower, daemon=True).start()
     ThreadingHTTPServer.allow_reuse_address = True
     ThreadingHTTPServer.daemon_threads = True
     print(time.strftime("%F %T"), f"{NODE}: dashboard on :{PORT}", flush=True)

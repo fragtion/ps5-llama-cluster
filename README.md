@@ -353,7 +353,7 @@ Part 1 needs you at a shell. Part 2 adds:
 | **keepalived** | A floating gateway address (the VIP) held by one console at a time. LiteLLM runs only on that console. |
 | **`llm-sync`** | Pushes the software and config from the console you changed to the other one over the link (rsync). |
 | **`llm-config-sync`** | Keeps `/etc/litellm`, the cluster YAML and a shared `/root/sync` folder the same on both consoles, both ways and deletions included, seconds after a change (unison, an inotify watcher, and a timer that catches up). |
-| **`llm-dash`** ([`cluster/bin/llm-dash.py`](cluster/bin/llm-dash.py), `llm-dash.service`) | A web page on either console's `:50080` showing both consoles: temperature, CPU, memory, GPU memory, disk and link graphs (6 h), services, models. It has buttons for the fan, the llama.cpp mode and model sync. |
+| **`llm-dash`** ([`cluster/bin/llm-dash.py`](cluster/bin/llm-dash.py), `llm-dash.service`) | A web page on either console's `:50080` showing both consoles: temperature, CPU, memory, GPU memory, disk and link graphs (6 h), services, models. It has buttons for the fan, the llama.cpp mode and model sync. An Inference tab shows llama.cpp's live state, per-request prefill and decode speeds and the layer map. |
 
 ### Behaviour
 
@@ -542,6 +542,14 @@ llm-cluster set models.sync true|false   # the same as the dashboard's model syn
   `llm-dash` clears it.
 - **Per console:** mode and readiness, the gateway, services, RAM, swap, GPU memory, disk, models
   and the weight cache.
+- **Inference tab** (`#llama`):
+  - **Live:** what each llama-server is doing (reading the prompt, with progress and speed, or
+    writing).
+  - **Per request:** prefill and decode speed, cache reuse, MTP draft acceptance and context
+    size, as charts and a table. It comes from llama-server's own log, so nothing needs a
+    restart or an extra flag.
+  - **Layer map:** which console holds each layer, worked out from the model file and the run
+    script the way llama.cpp's loader assigns them, beside each GPU's memory in use.
 - **Buttons:** the fan (auto, max, a target), the llama.cpp mode (as `llm-mode`), and model sync.
   - They need the gateway's master key, which the page asks for once and keeps in the browser.
     Reading needs no key: anyone on your LAN can see the page.

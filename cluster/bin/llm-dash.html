@@ -63,12 +63,33 @@ canvas { width: 100%; height: 170px; display: block; margin-top: 6px; }
   white-space: pre-wrap; display: none; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
 .models { font-size: 12px; color: var(--muted); }
 .offline { opacity: .55; }
+.tabs { display: flex; gap: 4px; background: var(--pill); border-radius: 9px; padding: 3px; }
+.tabs button { border: 0; background: transparent; }
+.tabs button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+[hidden] { display: none !important; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
+.tile { background: var(--pill); border-radius: 8px; padding: 8px 10px; }
+.tile .big { font-size: 24px; }
+.tile .muted { font-size: 12px; }
+.state { font-weight: 600; }
+.state.reading { color: var(--accent); } .state.generating { color: var(--ok); } .state.idle { color: var(--muted); }
+.layers { display: flex; gap: 2px; margin: 10px 0 8px; }
+.layers > div { flex: 1; height: 26px; border-radius: 3px; min-width: 0; }
+.layers > div.mtp { background-image: repeating-linear-gradient(45deg, transparent 0 3px, rgba(255,255,255,.45) 3px 5px); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; }
+.legend span.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 5px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
 </style>
 </head>
 <body>
 <main>
   <header>
     <h1>PS5 Pool</h1>
+    <span class="tabs" id="tabs"><button data-t="overview" class="on">Overview</button><button data-t="llama">Inference</button></span>
     <span class="muted" id="sub">loading…</span>
     <span class="spacer"></span>
     <span class="row" id="range">
@@ -77,6 +98,26 @@ canvas { width: 100%; height: 170px; display: block; margin-top: 6px; }
     <button id="keybtn">Set key</button>
   </header>
 
+  <div id="tab-llama" hidden>
+    <div class="grid" id="llama-nodes"></div>
+    <div class="card" style="margin-top:14px" id="layer-card"></div>
+    <div class="charts" id="llama-charts"></div>
+    <div class="card" style="margin-top:14px">
+      <h2>Recent requests</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Finished</th><th>Console</th><th>Prompt</th><th>Reused</th><th>New</th><th>Output</th>
+          <th>Prefill t/s</th><th>Decode t/s</th><th>Drafts accepted</th><th>Took</th><th>Context</th></tr></thead>
+        <tbody id="req-rows"></tbody>
+      </table></div>
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:14px">From llama-server's logs and its <code>/slots</code>: each
+      console keeps its last 200 requests while <code>llm-dash</code> runs, and reads back the current server run's when it
+      starts. "Reused" is prompt that was already in the cache; "New" had to be read. The layer map is worked out from the
+      model file and the run script the way llama.cpp's loader assigns layers (RPC devices first, <code>-ts</code> split
+      points, the input embedding in RAM); it shows weights only, not the KV cache.</p>
+  </div>
+
+  <div id="tab-overview">
   <div class="grid" id="nodes"></div>
 
   <div class="card" style="margin-top:14px">
@@ -93,6 +134,7 @@ canvas { width: 100%; height: 170px; display: block; margin-top: 6px; }
   <p class="muted" style="font-size:12px;margin-top:14px">Each console keeps 6 h of samples (every 5 s) in memory; a
     restart of <code>llm-dash</code> clears them. The temperature is the chip's CPU-side sensor: Linux sees no GPU temperature
     and no fan speed. Buttons need the gateway's master key and act on the console they're under.</p>
+  </div>
 </main>
 <div id="toast"></div>
 <script>
@@ -241,16 +283,16 @@ function render() {
   drawCharts();
 }
 
-function setupCharts() {
-  $("#charts").innerHTML = CHARTS.map(c => `<div class="card"><div class="chart-head"><h2 style="margin:0">${c.title}</h2>
+function setupCharts(box, list) {
+  $(box).innerHTML = list.map(c => `<div class="card"><div class="chart-head"><h2 style="margin:0">${c.title}</h2>
     <span class="readout" id="ro-${c.id}"></span></div><canvas id="cv-${c.id}"></canvas></div>`).join("");
-  for (const c of CHARTS) {
+  for (const c of list) {
     const cv = $("#cv-" + c.id);
     cv.addEventListener("mousemove", e => { c.hover = e.offsetX / cv.clientWidth; drawChart(c); });
     cv.addEventListener("mouseleave", () => { c.hover = null; drawChart(c); });
   }
 }
-function drawCharts() { for (const c of CHARTS) drawChart(c); }
+function drawCharts() { for (const c of CHARTS.concat(LLAMA_CHARTS)) drawChart(c); }
 
 function drawChart(c) {
   const cv = $("#cv-" + c.id); if (!cv) return;
@@ -258,9 +300,14 @@ function drawChart(c) {
   if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
   const col = COLORS(), L = 38, R = 8, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
-  const t1 = Date.now() / 1000, t0 = t1 - state.range;
-  const lines = [];
-  for (const n of state.order) {
+  const t1 = Date.now() / 1000;
+  let t0 = t1 - state.range;
+  let lines = [];
+  if (c.lines) {  // per-request charts span the requests they have
+    lines = c.lines();
+    const first = Math.min(...lines.flatMap(l => l.pts.map(p => p[0])));
+    t0 = isFinite(first) ? Math.min(first - 60, t1 - 900) : t1 - 3600;
+  } else for (const n of state.order) {
     const h = (state.hist[n] || []).filter(p => p.t >= t0);
     c.series.forEach(([k, label], si) => lines.push({ n, k, label, dash: si > 0, pts: h.filter(p => p[k] != null).map(p => [p.t, p[k]]) }));
   }
@@ -273,10 +320,10 @@ function drawChart(c) {
   for (let i = 0; i <= 4; i++) {
     const v = lo + (hi - lo) * i / 4, y = Math.round(Y(v)) + .5;
     g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke();
-    g.textAlign = "right"; g.fillText(fmt(v), L - 5, y + 4);
+    g.textAlign = "right"; g.fillText(String(+v.toFixed(2)), L - 5, y + 4);
   }
   g.textAlign = "center";
-  const step = state.range <= 900 ? 300 : state.range <= 3600 ? 900 : 3600;
+  const span = t1 - t0, step = [300, 900, 3600, 3 * 3600, 6 * 3600, 86400].find(x => span / x <= 8) || 86400;
   for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) {
     const d = new Date(t * 1000); g.fillText(d.toTimeString().slice(0, 5), X(t), H - 5);
   }
@@ -286,6 +333,11 @@ function drawChart(c) {
       g.beginPath(); g.moveTo(L, Y(i.fan.target)); g.lineTo(W - R, Y(i.fan.target)); g.stroke(); g.globalAlpha = 1; }
   }
   for (const l of lines) {
+    if (c.points) {  // one dot per request
+      g.fillStyle = nodeColor(l.n);
+      for (const [t, v] of l.pts) { g.beginPath(); g.arc(X(t), Y(v), 3, 0, 7); g.fill(); }
+      continue;
+    }
     g.strokeStyle = nodeColor(l.n); g.lineWidth = 1.6; g.setLineDash(l.dash ? [5, 3] : []);
     g.beginPath(); let prev = null;
     for (const [t, v] of l.pts) {
@@ -309,13 +361,138 @@ function drawChart(c) {
 const niceMax = v => { if (v <= 0) return 1; const p = 10 ** Math.floor(Math.log10(v)); return [1, 2, 5, 10].map(m => m * p).find(m => m >= v); };
 const fmt = v => Math.abs(v) >= 10 || Number.isInteger(v) ? Math.round(v).toString() : String(+v.toFixed(2));
 
+
+// ---- Inference tab ----
+const llama = { nodes: {}, order: [], timer: null };
+const reqLines = key => () => llama.order.filter(n => llama.nodes[n] && !llama.nodes[n].error).map(n => ({
+  n, label: "", pts: llama.nodes[n].requests.filter(r => r[key] != null).map(r => [r.end, r[key]]) }));
+const LLAMA_CHARTS = [
+  { id: "dec", title: "Decode speed per request", unit: "t/s", min: 0, max: 5, points: true, lines: reqLines("decode_tps") },
+  { id: "pre", title: "Prefill speed per request", unit: "t/s", min: 0, max: 50, points: true, lines: reqLines("prefill_tps") },
+];
+const n0 = v => v == null ? "–" : Math.round(v).toLocaleString();
+const pct = v => v == null ? "–" : Math.round(v * 100) + "%";
+const tps = r => r == null ? "–" : r >= 100 ? String(Math.round(r)) : r.toFixed(1);
+
+async function pollLlama() {
+  try {
+    const j = await (await fetch("/api/llama-nodes", { cache: "no-store" })).json();
+    llama.nodes = j.nodes; llama.order = Object.keys(j.nodes).sort();
+    if (!state.order.length) state.order = llama.order;
+    renderLlama();
+  } catch (e) { $("#sub").textContent = "can't reach this console: " + e.message; }
+}
+
+function slotState(d) {
+  const busy = (d.live || []).filter(s => s.busy);
+  if (!d.server) return { cls: "idle", text: d.worker ? "lending its GPU to the pool" : "no llama-server" };
+  if (!busy.length) return { cls: "idle", text: "idle" };
+  const s = busy[0];
+  return s.decoded > 0 ? { cls: "generating", text: "generating", s } : { cls: "reading", text: "reading the prompt", s };
+}
+
+function renderLlamaNode(name) {
+  const d = llama.nodes[name];
+  const head = `<div class="node-head"><span class="dot" style="background:${nodeColor(name)}"></span><h2 style="margin:0">${esc(name)}</h2>`;
+  if (!d || d.error) return `<div class="card offline">${head}<span class="pill bad">${esc(d ? d.error : "no data")}</span></div></div>`;
+  const st = slotState(d), reqs = (d.requests || []).filter(r => !r.cancelled), last = reqs[reqs.length - 1];
+  const mode = d.active ? (d.active === "llama-pool" ? "pool" : "standalone") : last ? last.mode : null;
+  const t = (mode && d.totals[mode]) || { requests: 0 }, slots = d.live || [];
+  let live = `<div class="muted" style="margin-top:6px">${last ? `last request ${new Date(last.end * 1000).toLocaleTimeString()}` : "no requests yet"}</div>`;
+  if (st.s) {
+    const s = st.s, lp = s.log_progress;
+    if (st.cls === "reading") {
+      // the log reports progress after each batch; before the first one only the cache size is known
+      live = lp ? `<div class="muted" style="margin-top:6px">${n0(lp.tokens)} of ~${n0(lp.tokens / lp.fraction)} prompt tokens read · ${tps(lp.tps)} t/s</div>
+        <div class="bar" style="margin-top:4px"><div style="width:${(lp.fraction * 100).toFixed(1)}%"></div></div>`
+        : `<div class="muted" style="margin-top:6px">reading the prompt · ${n0(s.tokens)} tokens in the cache so far</div>`;
+    } else {
+      live = `<div class="muted" style="margin-top:6px">${n0(s.decoded)} tokens written · ${tps(s.decode_tps)} t/s now</div>`;
+    }
+  }
+  const ctxSlot = st.s || slots[0];
+  const used = st.s ? st.s.tokens || 0 : last ? last.ctx : 0;
+  const nctx = ctxSlot ? ctxSlot.n_ctx : null;
+  const avgDec = t.decode_ms ? t.decode_tokens / t.decode_ms * 1000 : null;
+  const avgPre = t.prefill_ms ? t.prefill_tokens / t.prefill_ms * 1000 : null;
+  return `<div class="card">${head}
+      <span class="state ${st.cls}">● ${st.text}</span><span class="spacer"></span>
+      <span class="muted">${esc(d.model || (d.layout && d.layout.model) || "")}${d.active ? " · " + (d.active === "llama-pool" ? "pool" : "standalone") : ""}</span></div>
+    ${live}
+    <div class="tiles">
+      <div class="tile"><div class="big">${tps(last && last.decode_tps)}</div><div class="muted">decode t/s, last request</div></div>
+      <div class="tile"><div class="big">${tps(last && last.prefill_tps)}</div><div class="muted">prefill t/s, last request</div></div>
+      <div class="tile"><div class="big">${pct(last && last.draft_rate)}</div><div class="muted">MTP drafts accepted, last</div></div>
+      <div class="tile"><div class="big">${nctx ? pct(used / nctx) : "–"}</div><div class="muted">context: ${n0(used)} / ${n0(nctx)}</div></div>
+    </div>
+    <div class="muted" style="margin-top:10px;font-size:13px">${mode ? esc(mode) + ": " : ""}${t.requests} requests · average decode ${tps(avgDec)} t/s,
+      prefill ${tps(avgPre)} t/s · ${n0(t.prefill_tokens)} tokens read, ${n0(t.reused)} reused from cache, ${n0(t.decode_tokens)} written ·
+      drafts accepted ${t.draft_generated ? pct(t.draft_accepted / t.draft_generated) : "–"}${slots.length > 1 ? ` · ${slots.length} slots` : ""}</div>
+  </div>`;
+}
+
+function renderLayers() {
+  // the pool's map when the coordinator runs it (or nothing runs); otherwise each console's own
+  const lays = llama.order.map(n => llama.nodes[n]).filter(d => d && !d.error && d.layout && !d.layout.error).map(d => d.layout);
+  const pool = lays.find(l => l.service === "llama-pool");
+  const show = pool && (pool.running || !lays.some(l => l.running)) ? [pool] : lays.filter(l => l.running);
+  if (!show.length) { $("#layer-card").innerHTML = `<h2>Layer map</h2><p class="muted">No llama-server is running.</p>`; return; }
+  const color = dev => dev.endsWith(" RAM") ? COLORS().muted : nodeColor(dev);
+  const nowVram = n => { const h = state.hist[n]; return h && h.length ? h[h.length - 1].vram * 2 ** 20 : null; };
+  $("#layer-card").innerHTML = `<h2>Layer map</h2>` + show.map(l => {
+    const range = dev => { const ix = l.layers.map((x, i) => x.dev === dev && !x.mtp ? i : -1).filter(i => i >= 0);
+      return ix.length ? `layers ${ix[0]}–${ix[ix.length - 1]}` : ""; };
+    const names = { input: "input embeddings", output: "output head", vision: "vision projector" };
+    const extras = dev => [l.layers.some(x => x.mtp && x.dev === dev) && "MTP layer",
+      ...Object.entries(l.parts).filter(([, p]) => p.dev === dev).map(([k]) => names[k])].filter(Boolean);
+    const devs = Object.keys(l.per_device).sort((a, b) => (a.endsWith(" RAM") - b.endsWith(" RAM")) || l.devices.indexOf(a) - l.devices.indexOf(b));
+    return `<div class="muted" style="font-size:13px">${esc(l.model)} · ${l.service === "llama-pool" ? "pooled" : "standalone"}${l.split ? ` · split <code>-ts ${l.split.join(",")}</code> (the first number is ${esc(l.devices[0])})` : ""}${l.running ? "" : " · <b>configured, not running</b>"}</div>
+      <div class="layers">${l.layers.map((x, i) => `<div class="${x.mtp ? "mtp" : ""}" style="background-color:${color(x.dev)}" title="layer ${i}${x.mtp ? " (MTP)" : ""} · ${esc(x.dev)} · ${(x.bytes / 2 ** 20).toFixed(0)} MiB"></div>`).join("")}</div>
+      <div class="legend">${devs.map(dev => {
+        const v = !dev.endsWith(" RAM") && nowVram(dev);
+        return `<span><span class="sw" style="background:${color(dev)}"></span><b>${esc(dev)}</b> · ${[range(dev), ...extras(dev)].filter(Boolean).join(", ")} · ${gb(l.per_device[dev])} of weights${v ? ` · ${gb(v)} VRAM in use now` : ""}</span>`;
+      }).join("")}</div>`;
+  }).join(`<hr style="border:0;border-top:1px solid var(--line);margin:14px 0">`);
+}
+
+function renderLlama() {
+  if ($("#tab-llama").hidden) return;
+  $("#llama-nodes").innerHTML = llama.order.map(renderLlamaNode).join("");
+  renderLayers();
+  const rows = llama.order.flatMap(n => ((llama.nodes[n] || {}).requests || []).map(r => ({ ...r, n })))
+    .sort((a, b) => b.end - a.end).slice(0, 40);
+  $("#req-rows").innerHTML = rows.map(r => `<tr>
+    <td>${new Date(r.end * 1000).toLocaleTimeString()}</td>
+    <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${nodeColor(r.n)};margin-right:6px"></span>${esc(r.n)}${r.mode === "pool" ? " (pool)" : ""}</td>
+    ${r.cancelled ? `<td colspan="8" class="muted" style="text-align:center">stopped before it finished</td><td>${n0(r.ctx)}</td>` : `
+    <td>${n0(r.prompt)}</td><td>${n0(r.reused)}</td><td>${n0(r.prefill_tokens)}</td><td>${n0(r.decode_tokens)}</td>
+    <td>${tps(r.prefill_tps)}</td><td>${tps(r.decode_tps)}</td><td>${pct(r.draft_rate)}</td>
+    <td>${r.start ? took(r.end - r.start) : "–"}</td><td>${n0(r.ctx)}</td>`}</tr>`).join("")
+    || `<tr><td colspan="11" class="muted" style="text-align:center">no requests yet</td></tr>`;
+  for (const c of LLAMA_CHARTS) drawChart(c);
+}
+const took = s => s < 60 ? s.toFixed(1) + " s" : dur(s);
+
+function showTab(t) {
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
+  $("#tab-overview").hidden = t !== "overview"; $("#tab-llama").hidden = t !== "llama";
+  $("#range").hidden = t !== "overview";
+  clearInterval(llama.timer);
+  if (t === "llama") { pollLlama(); llama.timer = setInterval(pollLlama, 2000); } else drawCharts();
+  try { localStorage.setItem("llmdash-tab", t); } catch {}
+}
+for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => showTab(b.dataset.t);
+
 function updateKeyBtn() { $("#keybtn").textContent = getKey() ? "Forget key" : "Set key"; }
 $("#keybtn").onclick = () => { if (getKey()) setKey(""); else { const k = prompt("Gateway master key:"); if (k) setKey(k.trim()); } updateKeyBtn(); };
 for (const b of document.querySelectorAll("#range button")) b.onclick = () => {
   state.range = +b.dataset.r; document.querySelectorAll("#range button").forEach(x => x.classList.toggle("on", x === b)); drawCharts(); };
 window.addEventListener("resize", drawCharts);
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
-setupCharts(); updateKeyBtn(); poll(); setInterval(poll, 5000);
+setupCharts("#charts", CHARTS); setupCharts("#llama-charts", LLAMA_CHARTS); updateKeyBtn(); poll(); setInterval(poll, 5000);
+// #overview or #llama in the address picks the tab; otherwise the last one used
+showTab(["#overview", "#llama"].includes(location.hash) ? location.hash.slice(1)
+  : (() => { try { return localStorage.getItem("llmdash-tab") || "overview"; } catch { return "overview"; } })());
 </script>
 </body>
 </html>
