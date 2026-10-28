@@ -63,7 +63,9 @@ ROLE = "standalone" if SINGLE else CLUSTER["self"]["role"]
 PEER = None if SINGLE else CLUSTER["peer"]
 # the network chart: the console-to-console link in a pair, the LAN otherwise
 LINK_IF = default_if() if SINGLE else CLUSTER["link"]["interface"]
-PORT = int(os.environ.get("PORT", "50080"))
+PORT = int(os.environ.get("PORT", "50080"))  # also the port the two dashboards talk to each other on
+# more ports to answer on, e.g. 80 for http://<console>/ ("" for none)
+ALSO_PORTS = [int(p) for p in os.environ.get("ALSO_PORTS", "80").split(",") if p.strip()]
 HERE = Path(__file__).resolve().parent
 GPU = Path("/sys/class/drm/card0/device")
 FAN = Path("/sys/devices/platform/ps5-fan/target_temp")
@@ -185,6 +187,9 @@ PATTERNS = {
     "release": re.compile(r"stop processing: n_tokens = (\d+), truncated = (\d)"),
 }
 MODEL = re.compile(r"loading model '([^']+)'")
+LISTENING = re.compile(r"listening on http")
+# a fatal error, e.g. "/root/llm/.../ggml-rpc.cpp:650: Failed to connect to 10.13.37.2:50052" (no time prefix)
+FATAL = re.compile(r"\.(?:cpp|c|h):\d+: (.+)$")
 
 
 class LlamaLog:
@@ -202,6 +207,8 @@ class LlamaLog:
         self.model = None
         self.open = {}      # task -> request in progress
         self.done = collections.deque(maxlen=200)
+        # the start: is this run serving yet, how long the last good start took, why the last one failed
+        self.loaded, self.load_s, self.error, self.failed = True, None, None, None
 
     def catch_up(self):
         try:
@@ -250,6 +257,8 @@ class LlamaLog:
     def line(self, line, live=False):
         m = LOG_LINE.match(line)
         if not m:
+            if fm := FATAL.search(line):
+                self.error = fm[1].strip()[:200]
             return
         rel = self.rel(line)
         if rel + 1 < self.last_rel or self.base is None:  # a new run
@@ -260,8 +269,14 @@ class LlamaLog:
             self.base = time.time() - rel  # keep up with clock jumps (NTP after boot)
         self.last_rel = rel
         body = m[5]
-        if mm := MODEL.search(body):
+        if mm := MODEL.search(body):  # a run starts loading
             self.model = Path(mm[1]).name.removesuffix(".gguf")
+            if not self.loaded and self.error:
+                self.failed = self.error
+            self.loaded, self.error = False, None
+            return
+        if LISTENING.search(body):
+            self.loaded, self.load_s, self.failed = True, round(rel), None
             return
         tm = TASK.search(body)
         if not tm:
@@ -493,6 +508,26 @@ def units():
     return {u: found[u] for u in UNITS if u in found}
 
 
+def startup():
+    """The llama-server that is starting here, if one is: how long it has been at it, how long the last
+    good start took, and the error the last attempt (or this one) ended with."""
+    out = subprocess.run(["systemctl", "show", "-p", "Id,ActiveState,ExecMainStartTimestampMonotonic",
+                          *(f"{u}.service" for u in LOGS)], capture_output=True, text=True).stdout
+    for block in out.split("\n\n"):
+        p = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        u, mono = p.get("Id", "").removesuffix(".service"), int(p.get("ExecMainStartTimestampMonotonic") or 0)
+        if u not in LOGS or p.get("ActiveState") not in ("active", "activating") or not mono:
+            continue
+        log, since = LOGS[u], time.monotonic() - mono / 1e6
+        # the log may not have this run's first line yet: then it still describes the run before
+        fresh = log.base is not None and log.base >= time.time() - since - 5
+        if fresh and log.loaded:
+            return None
+        return {"unit": u, "mode": log.mode, "since": round(since), "last_s": log.load_s,
+                "error": (log.error or log.failed) if fresh else log.error if not log.loaded else None}
+    return None
+
+
 _fan = {"at": 0.0, "target": None}
 
 
@@ -560,6 +595,7 @@ def info():
         "vram_total": int(read(GPU / "mem_info_vram_total", "0")),
         "gtt_total": int(read(GPU / "mem_info_gtt_total", "0")),
         "slots": [{"n_ctx": x.get("n_ctx"), "busy": x.get("is_processing")} for x in s] if s else None,
+        "startup": startup(),
     }
 
 
@@ -680,7 +716,14 @@ def main():
     threading.Thread(target=log_follower, daemon=True).start()
     ThreadingHTTPServer.allow_reuse_address = True
     ThreadingHTTPServer.daemon_threads = True
-    print(time.strftime("%F %T"), f"{NODE}: dashboard on :{PORT}, "
+    serving = [PORT]
+    for port in ALSO_PORTS:
+        try:
+            threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever, daemon=True).start()
+            serving.append(port)
+        except OSError as e:  # taken by something else: the main port still serves
+            print(time.strftime("%F %T"), f"port {port} unavailable: {e}", flush=True)
+    print(time.strftime("%F %T"), f"{NODE}: dashboard on " + ", ".join(f":{p}" for p in serving) + ", "
           + ("one console" if SINGLE else f"paired with {PEER['name']}"), flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 

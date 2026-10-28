@@ -15,7 +15,7 @@ that would otherwise sit under a TV.
   <img src="docs/screenshots/graphs.png" alt="Overview graphs: chip temperature, CPU, memory, link, disk and busy slots" width="32%">
   <img src="docs/screenshots/requests.png" alt="Recent requests: prompt, cache reuse, prefill and decode speed, MTP draft acceptance" width="32%">
 </p>
-<p align="center"><sub>The built-in dashboard (<code>llm-dash</code>, port 50080) on the pair: live inference and the layer split, both consoles at a glance, 6 h of graphs, and every request's speed.</sub></p>
+<p align="center"><sub>The built-in dashboard (<code>llm-dash</code>, port 80) on the pair: live inference and the layer split, both consoles at a glance, 6 h of graphs, and every request's speed.</sub></p>
 
 **One PS5 works well on its own too.** Compared with the stock ps5-linux desktop, the setup here is
 built for inference:
@@ -311,7 +311,7 @@ service and the dashboard. Everything lives under `/root`, as in Part 1.
    cp cluster/bin/llm-dash.py cluster/bin/llm-dash.html /root/bin/
    cp cluster/systemd/llm-dash.service /etc/systemd/system/
    echo "LLM_DASH_KEY=$(openssl rand -hex 16)" > /etc/default/llm-dash && chmod 600 /etc/default/llm-dash
-   systemctl daemon-reload && systemctl enable --now llm-dash      # http://<console>:50080/
+   systemctl daemon-reload && systemctl enable --now llm-dash      # http://<console>/
    ```
 
    - **One console.** Without a two-console `/etc/llm-cluster.yaml` (Part 2), the dashboard shows
@@ -427,7 +427,7 @@ Part 1 needs you at a shell. Part 2 adds:
 | **keepalived** | A floating gateway address (the VIP) held by one console at a time. LiteLLM runs only on that console. |
 | **`llm-sync`** | Pushes the software and config from the console you changed to the other one over the link (rsync). |
 | **`llm-config-sync`** | Keeps `/etc/litellm`, the cluster YAML and a shared `/root/sync` folder the same on both consoles, both ways and deletions included, seconds after a change (unison, an inotify watcher, and a timer that catches up). |
-| **`llm-dash`** ([`cluster/bin/llm-dash.py`](cluster/bin/llm-dash.py), `llm-dash.service`) | A web page on either console's `:50080` showing both consoles (or, [without a pair](#a-single-ps5), the one): temperature, CPU, memory, GPU memory, disk and link graphs (6 h), services, models. It has buttons for the fan, the llama.cpp mode and model sync. An Inference tab shows llama.cpp's live state, per-request prefill and decode speeds and the layer map. |
+| **`llm-dash`** ([`cluster/bin/llm-dash.py`](cluster/bin/llm-dash.py), `llm-dash.service`) | A web page on either console (port 80, and 50080) showing both consoles (or, [without a pair](#a-single-ps5), the one): temperature, CPU, memory, GPU memory, disk and link graphs (6 h), services, models. It has buttons for the fan, the llama.cpp mode and model sync. An Inference tab shows llama.cpp's live state, per-request prefill and decode speeds and the layer map. |
 
 ### Behaviour
 
@@ -518,7 +518,7 @@ systemctl disable --now llama-pool ggml-rpc llama-qwen 2>/dev/null   # the daemo
 systemctl enable --now llm-peer
 systemctl enable --now keepalived
 systemctl enable --now llm-config-watch llm-config-sync.timer rpc-cache-check.timer
-systemctl enable --now llm-dash                                     # http://<either console>:50080/
+systemctl enable --now llm-dash                                     # http://<either console>/
 ```
 
 Point your clients at `http://<vip>:4000/v1`, with the master key as their API key, and model
@@ -609,8 +609,12 @@ cp my-script.sh /root/sync/     # on either console: it's on both within seconds
 llm-cluster set models.sync true|false   # the same as the dashboard's model sync button
 ```
 
-**The dashboard**, `http://<either console>:50080/`, shows both consoles whichever one you open
-(it fetches the other over the link).
+**The dashboard**, `http://<either console>/` (or `:50080`; the gateway address works too), shows both
+consoles whichever one you open (it fetches the other over the link on 50080). Set `ALSO_PORTS` in
+`/etc/default/llm-dash` to change the extra ports (`ALSO_PORTS=` for 50080 only).
+- **Starting:** while llama-server loads, a banner names the console, how long it has been
+  starting, how long the last start took, and the error the last attempt ended with, if any.
+  Requests to it fail until then.
 - **Graphs:** chip temperature with the fan target, CPU, memory, link and disk throughput, and
   busy llama.cpp slots, over 15 min, 1 h or 6 h. History is kept in memory, so a restart of
   `llm-dash` clears it.
@@ -752,7 +756,7 @@ pool/                         Part 1: the simple pool
 cluster/                      Part 2: the self-managing cluster
   etc/llm-cluster.yaml          the one config file
   bin/llm_cluster.py            `llm-cluster get|set|ensure`
-  bin/llm-dash.py, llm-dash.html  the web dashboard on :50080 (also on a single console)
+  bin/llm-dash.py, llm-dash.html  the web dashboard on :80 and :50080 (also on a single console)
   bin/llm-peerd.py              the peer daemon
   bin/llm-mode                  replaces Part 1's (auto mode, role from the YAML)
   bin/llm-sync                  rsync push to the other console

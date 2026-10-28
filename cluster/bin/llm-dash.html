@@ -58,6 +58,11 @@ input[type=number] { width: 64px; }
 .readout { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 canvas { width: 100%; height: 170px; display: block; margin-top: 6px; }
 .warnbox { border-left: 3px solid var(--warn); padding: 6px 10px; background: var(--pill); border-radius: 6px; font-size: 13px; }
+.banner { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--warn); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 14px; }
+.banner.bad { border-left-color: var(--bad); }
+.banner > div + div { margin-top: 6px; }
+.starting { color: var(--warn); }
 #toast { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: calc(100% - 32px);
   background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
   white-space: pre-wrap; display: none; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
@@ -100,6 +105,7 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
     </span>
     <button id="keybtn">Set key</button>
   </header>
+  <div id="banner" class="banner" hidden></div>
 
   <div id="tab-llama" hidden>
     <div class="grid" id="llama-nodes"></div>
@@ -166,6 +172,7 @@ function toast(msg, ms = 4000) { const t = $("#toast"); t.textContent = msg; t.s
   clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = "none", ms); }
 function dur(s) { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; }
+const mmss = s => s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s`;
 function nodeColor(name) { const c = COLORS(); return state.order.indexOf(name) === 0 ? c.a : c.b; }
 
 async function poll() {
@@ -241,6 +248,8 @@ function renderNode(name) {
     mode = u === "active" || i.slots ? "on" : u === "activating" ? "starting" : "off";
     ready = !!i.slots; how = "standalone";
   }
+  const st = i.startup, waiting = !!st || !ready && mode !== "off" && mode !== "manual";
+  if (st && i.single) mode = "starting";
   const fanMode = i.fan.mode, tgt = i.fan.target;
   const disk = i.disks.map(x => bar(x.path === "/" ? "disk /" : "cache drive", x.used, x.total)).join("");
   const slots = i.slots ? `${i.slots.filter(s => s.busy).length} of ${i.slots.length} busy · ${i.slots[0].n_ctx.toLocaleString()} ctx` : "no llama-server";
@@ -254,8 +263,8 @@ function renderNode(name) {
     <div class="row" style="margin-top:10px;gap:18px;align-items:flex-end">
       <div><div class="big">${now.temp != null ? Math.round(now.temp) + "°" : "–"}</div><div class="muted">chip</div></div>
       <div><div class="big" style="font-size:22px">${tgt ?? "–"}°</div><div class="muted">fan target · ${esc(fanMode)}</div></div>
-      <div><div class="big" style="font-size:22px">${esc(mode)}${ready || mode === "off" || !p && !i.single ? "" : " …"}</div>
-        <div class="muted">llama.cpp · ${how} · ${ready ? "ready" : "not ready"}</div></div>
+      <div><div class="big ${waiting ? "starting" : ""}" style="font-size:22px">${esc(mode)}${ready || mode === "off" || !p && !i.single ? "" : " …"}</div>
+        <div class="muted">llama.cpp · ${how} · ${ready && !st ? "ready" : st ? `<span class="starting">starting, ${mmss(st.since)}</span>` : "not ready"}</div></div>
     </div>
     <div class="node-body"><div>
     <h3>Fan</h3>
@@ -287,7 +296,28 @@ function renderNode(name) {
   </div></div></div>`;
 }
 
+// a console whose llama.cpp isn't serving yet: a llama-server still loading, or the daemon between modes
+function notReady(name) {
+  const d = state.nodes[name];
+  if (!d || d.error) return null;
+  const i = d.info, p = i.peerd;
+  if (i.startup) return { name, ...i.startup };
+  if (p && !p.ready && p.mode !== "off") return { name, mode: p.mode };
+  return null;
+}
+function bannerLine(x) {
+  const what = { pool: "the pool", standalone: "llama.cpp (standalone)", worker: "the RPC worker" }[x.mode] || `llama.cpp (${esc(x.mode)})`;
+  const time = x.since == null ? "not ready yet"
+    : `${mmss(x.since)} so far` + (x.last_s ? `; the last start took ${mmss(x.last_s)}` : "");
+  return `<div><b>${esc(x.name)}: ${what} is starting</b> · ${time}. Requests sent to it fail until it's ready.`
+    + (x.error ? `<br><span class="muted">Last error: ${esc(x.error)}</span>` : "") + "</div>";
+}
+
 function render() {
+  const waiting = state.order.map(notReady).filter(Boolean);
+  $("#banner").hidden = !waiting.length;
+  $("#banner").innerHTML = waiting.map(bannerLine).join("");
+  $("#banner").classList.toggle("bad", waiting.some(x => x.error));
   const live = state.order.filter(n => !state.nodes[n].error);
   const gw = live.find(n => (state.nodes[n].info.gateway || {}).here);
   $("#sub").textContent = (state.single ? state.self : `viewing via ${state.self} · gateway on ${gw || "neither"}`)
