@@ -15,6 +15,7 @@ model_list:
       order: 1
       timeout: 1800
       stream_timeout: 1800
+      keepalive_seconds: 10    # an SSE ping while the server is silent (a long prompt read), so clients do not time out
   - model_name: ps5
     litellm_params:
       model: openai/ps5
@@ -23,6 +24,7 @@ model_list:
       order: 2
       timeout: 1800
       stream_timeout: 1800
+      keepalive_seconds: 10    # an SSE ping while the server is silent (a long prompt read), so clients do not time out
   - model_name: ps5a
     litellm_params:
       model: openai/ps5
@@ -30,6 +32,7 @@ model_list:
       api_key: none
       timeout: 1800
       stream_timeout: 1800
+      keepalive_seconds: 10    # an SSE ping while the server is silent (a long prompt read), so clients do not time out
   - model_name: ps5b
     litellm_params:
       model: openai/ps5
@@ -37,6 +40,7 @@ model_list:
       api_key: none
       timeout: 1800
       stream_timeout: 1800
+      keepalive_seconds: 10    # an SSE ping while the server is silent (a long prompt read), so clients do not time out
 
   # Where `ps5` requests with images go while no pool is up (standalone mode is text only): any
   # OpenAI-compatible server with a vision model, e.g. LM Studio or llama-server on another machine.
@@ -56,6 +60,8 @@ model_list:
   #     api_base: http://192.168.1.10:8080/v1
   #     api_key: os.environ/DESKTOP_API_KEY
   #     timeout: 1800
+  #     stream_timeout: 1800
+  #     keepalive_seconds: 10
 
 router_settings:
   num_retries: 1         # a refused connection fails fast; the retry goes to the next live deployment
