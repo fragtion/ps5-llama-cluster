@@ -789,6 +789,8 @@ changing models or builds, or move it to a [cache drive](#optional-a-cache-drive
 - **A soft reboot keeps it.** `ps5-kernel try <version>`, like the image's
   `/boot/efi/kexec.sh`, restarts Linux with kexec, without going back to the PS5's firmware.
   From 7.1.7 into 7.3.3, SSH was back after about 40 s and the pool after about 4 minutes.
+  From 7.3.3 into 7.3.3 it takes about 25 s, which makes it a quick way to pick up a glibc or
+  Mesa update.
   Only go into the same or a newer kernel: a soft reboot from 7.3.3 into 7.1.7 hung the
   network (see [step 5](#5-kernel-updates-without-reflashing)). A hang there still means a
   power cycle and the jailbreak.
@@ -804,8 +806,8 @@ LAN clients, Wi-Fi clients included, reach the ethernet addresses and the VIP no
 `cat /sys/class/hwmon/hwmon*/temp1_input` gives the CPU temperature in millidegrees (`k10temp`).
 On kernel 7.1 Linux sees no GPU temperature and no fan speed. 7.3 adds the GPU's sensors and the
 fan's duty.
-Keep `ps5fan.service` enabled whenever `ps5boost.service` is: boost without the fan is asking
-for trouble.
+On 7.1, keep `ps5fan.service` enabled whenever `ps5boost.service` is: boost without the fan is
+asking for trouble. On 7.3 the kernel runs the fan, so `ps5fan.service` has nothing to do.
 
 How the fan is controlled depends on the kernel. [`ps5-fan`](system/bin/ps5-fan) handles both,
 and the dashboard's fan buttons call it:
@@ -827,6 +829,8 @@ ps5-fan pwm 150         # 7.3 only: a fixed duty, 0-255
   the curve says. Here the target is the curve's top point: `ps5-fan target 80` shifts the whole
   curve so full speed comes at 80 °C (42-90). `ps5fan.service` skips itself on 7.3 (the
   `ps5fan.service.d` drop-in), since the controller's servo pattern would fight the kernel.
+  Once 7.1 is gone (`ps5-kernel forget`), remove it: `systemctl disable ps5fan` and delete
+  `/etc/systemd/system/ps5fan.service` and its drop-in. `ps5boost.service` stays.
 - **Nothing survives a reboot.**
 
 ---
