@@ -141,8 +141,10 @@ th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: l
 
   <div class="charts" id="charts"></div>
   <p class="muted" style="font-size:12px;margin-top:14px">Each console keeps 6 h of samples (every 5 s) in memory; a
-    restart of <code>llm-dash</code> clears them. The temperature is the chip's CPU-side sensor: Linux sees no GPU temperature
-    and no fan speed. Buttons need the dashboard's key (<code>LLM_DASH_KEY</code> in <code>/etc/default/llm-dash</code>,
+    restart of <code>llm-dash</code> clears them. The temperature is the chip's CPU-side sensor. On kernel 7.1 Linux sees no GPU
+    temperature and no fan speed, and the fan target is the temperature the console's controller holds the chip at. On 7.3 and
+    later it's where the kernel's fan curve reaches full speed, and the fan's duty shows next to it.
+    Buttons need the dashboard's key (<code>LLM_DASH_KEY</code> in <code>/etc/default/llm-dash</code>,
     or else the gateway's master key) and act on the console they're under.</p>
   </div>
 </main>
@@ -262,7 +264,7 @@ function renderNode(name) {
       ${i.gateway && i.gateway.here ? `<span class="pill ok" title="holds ${esc(i.gateway.vip)}">gateway</span>` : ""}</div>
     <div class="row" style="margin-top:10px;gap:18px;align-items:flex-end">
       <div><div class="big">${now.temp != null ? Math.round(now.temp) + "°" : "–"}</div><div class="muted">chip</div></div>
-      <div><div class="big" style="font-size:22px">${tgt ?? "–"}°</div><div class="muted">fan target · ${esc(fanMode)}</div></div>
+      <div><div class="big" style="font-size:22px">${tgt ?? "–"}°</div><div class="muted" title="${i.fan.pwm != null ? "full speed at this temperature; the fan's duty now" : "the temperature the fan controller holds the chip at"}">fan target · ${esc(fanMode)}${i.fan.pwm != null ? " · " + Math.round(i.fan.pwm * 100 / 255) + "%" : ""}</div></div>
       <div><div class="big ${waiting ? "starting" : ""}" style="font-size:22px">${esc(mode)}${ready || mode === "off" || !p && !i.single ? "" : " …"}</div>
         <div class="muted">llama.cpp · ${how} · ${ready && !st ? "ready" : st ? `<span class="starting">starting, ${mmss(st.since)}</span>` : "not ready"}</div></div>
     </div>

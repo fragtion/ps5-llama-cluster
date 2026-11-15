@@ -1,22 +1,40 @@
 #!/bin/sh
-# Fan control for one PS5 (ps5-linux kernel + ps5-linux-tools). The console's fan controller holds
-# the main chip at a target temperature. Linux can move that target or run the fan flat out, but it
-# can't set a fixed speed or read the fan's RPM.
-#   ps5-fan [status]    chip temperature, target, mode
-#   ps5-fan target <N>  hold the chip at N °C: lower spins the fan up sooner and harder
+# Fan control for one PS5 (ps5-linux kernel). Works with both fan drivers:
+#   kernel 7.1: the console's fan controller holds the chip at a target temperature. Linux can move
+#     that target (/sys/devices/platform/ps5-fan/target_temp) or run the fan flat out with
+#     ps5_control (ps5-linux-tools), but it can't set a fixed speed or read the fan's speed.
+#   kernel 7.3 and later: the kernel drives the fan from a curve (hwmon "ps5_fan"). Here the target is
+#     the curve's top point, where the fan reaches full speed (87 °C by default). Setting it shifts
+#     the whole curve. The duty can also be fixed, and read.
+#   ps5-fan [status]    chip temperature, target, mode (and the fan's duty on 7.3)
+#   ps5-fan target <N>  lower spins the fan up sooner and harder
 #   ps5-fan max         full speed (loud)
 #   ps5-fan auto        back to automatic, with the target this console booted with
-# Nothing survives a reboot: ps5fan.service starts the fan in automatic again.
-# Each mode change resets the target: `ps5_control --fan on` sets 91 °C, and `--fan max` only sets
-# 86 °C. So max also sets a target far below anything the chip reaches under load, which keeps the
-# controller at its top speed.
+#   ps5-fan pwm <N>     fixed duty, 0-255 (7.3 only; the kernel still goes to full speed at 90 °C)
+# Nothing survives a reboot. On 7.1, ps5fan.service starts the fan in automatic again. On 7.3 the
+# kernel starts with its default curve.
+# 7.1: each mode change resets the target. `ps5_control --fan on` sets 91 °C, and `--fan max` only
+# sets 86 °C. So max also sets a target far below anything the chip reaches under load, which keeps
+# the controller at its top speed.
 dev=/sys/devices/platform/ps5-fan/target_temp
 ctl=/usr/local/sbin/ps5_control
-state=/run/ps5-fan   # the controller can't report its mode, so remember what was set here
+state=/run/ps5-fan   # 7.1's controller can't report its mode, so remember what was set here
 mkdir -p $state
 
-# The first change records the boot target, so `auto` can restore it.
-save_boot() { [ -s $state/boot-target ] || cat $dev > $state/boot-target; }
+hw=
+if [ ! -e $dev ]; then
+  for h in /sys/class/hwmon/hwmon*; do
+    [ "$(cat $h/name 2>/dev/null)" = ps5_fan ] && hw=$h
+  done
+  [ -n "$hw" ] || { echo "no PS5 fan driver: neither $dev nor a ps5_fan hwmon"; exit 1; }
+fi
+
+get_target() {
+  if [ -n "$hw" ]; then echo $(( $(cat $hw/pwm1_auto_point8_temp) / 1000 )); else cat $dev; fi
+}
+
+# The first change records the boot target, so `auto` can restore it (7.1) and status can show it.
+save_boot() { [ -s $state/boot-target ] || get_target > $state/boot-target; }
 
 chip_temp() {
   for h in /sys/class/hwmon/hwmon*; do
@@ -25,30 +43,86 @@ chip_temp() {
   echo '?'
 }
 
+# 7.3: shift the default curve so its top point is at $1 °C. The kernel checks the curve after
+# every single write (stop < point 1 < ... < point 8 <= 90 °C), so lowering moves the bottom first
+# and raising moves the top first.
+shift_curve() {
+  echo 1 > $hw/curve_reset || return 1
+  top=$(cat $hw/pwm1_auto_point8_temp)
+  lo=$(( (top - $(cat $hw/pwm1_auto_point1_temp_hyst) + 999) / 1000 ))   # the stop point stays >= 0
+  [ "$1" -ge $lo ] && [ "$1" -le 90 ] || { echo "the target can be $lo-90 °C"; return 2; }
+  d=$(( $1 * 1000 - top ))
+  if [ $d -lt 0 ]; then order="h 1 2 3 4 5 6 7 8"; else order="8 7 6 5 4 3 2 1 h"; fi
+  for n in $order; do
+    if [ $n = h ]; then f=$hw/pwm1_auto_point1_temp_hyst; else f=$hw/pwm1_auto_point${n}_temp; fi
+    echo $(( $(cat $f) + d )) > $f || { echo 1 > $hw/curve_reset; return 1; }
+  done
+}
+
+mode_now() {
+  if [ -n "$hw" ]; then
+    case $(cat $hw/pwm1_enable) in 0) echo max ;; 1) echo "fixed $(cat $hw/pwm1)" ;; *) echo auto ;; esac
+  else
+    cat $state/mode 2>/dev/null || echo auto
+  fi
+}
+
 case "$1" in
   status|"")
-    target=$(cat $dev) || exit 1
+    target=$(get_target) || exit 1
     boot=$(cat $state/boot-target 2>/dev/null)
     echo "chip    $(chip_temp) °C"
+    [ -n "$hw" ] && echo "soc     $(( $(cat $hw/temp1_input) / 1000 )) °C (the sensor the fan curve follows)"
     echo "target  $target °C$([ -n "$boot" ] && [ "$boot" != "$target" ] && echo " (booted with $boot)")"
-    echo "mode    $(cat $state/mode 2>/dev/null || echo auto)"
+    echo "mode    $(mode_now)"
+    if [ -n "$hw" ]; then
+      p=$(cat $hw/pwm1)
+      echo "fan     $p/255 ($(( p * 100 / 255 ))%)"
+      c=; for n in 1 2 3 4 5 6 7 8; do
+        c="$c $(( $(cat $hw/pwm1_auto_point${n}_temp) / 1000 )):$(cat $hw/pwm1_auto_point${n}_pwm)"
+      done
+      echo "curve  $c (°C:duty), off below $(( $(cat $hw/pwm1_auto_point1_temp_hyst) / 1000 )) °C"
+    fi
     echo "boost   $([ "$(systemctl is-active ps5boost.service)" = active ] && echo on || echo off)" ;;
   target)
-    case "$2" in ''|*[!0-9]*) echo "usage: ps5-fan target <0-100>"; exit 2 ;; esac
-    [ "$2" -le 100 ] || { echo "the controller accepts 0-100 °C"; exit 2; }
+    case "$2" in ''|*[!0-9]*) echo "usage: ps5-fan target <°C>"; exit 2 ;; esac
     save_boot
-    echo "$2" > $dev || exit 1
-    echo "target $2 °C" ;;
+    if [ -n "$hw" ]; then
+      shift_curve "$2" || exit $?
+      echo 2 > $hw/pwm1_enable || exit 1
+      echo auto > $state/mode
+      echo "full speed at $2 °C, the rest of the curve moved with it"
+    else
+      [ "$2" -le 100 ] || { echo "the controller accepts 0-100 °C"; exit 2; }
+      echo "$2" > $dev || exit 1
+      echo "target $2 °C"
+    fi ;;
   max)
     save_boot
-    $ctl --fan max > /dev/null || exit 1
-    echo 50 > $dev || exit 1
+    if [ -n "$hw" ]; then
+      echo 0 > $hw/pwm1_enable || exit 1
+    else
+      $ctl --fan max > /dev/null || exit 1
+      echo 50 > $dev || exit 1
+    fi
     echo max > $state/mode
     echo "fan at full speed; \`ps5-fan auto\` to undo" ;;
   auto)
-    $ctl --fan on > /dev/null || exit 1
+    if [ -n "$hw" ]; then
+      echo 1 > $hw/curve_reset && echo 2 > $hw/pwm1_enable || exit 1
+    else
+      $ctl --fan on > /dev/null || exit 1
+      [ -s $state/boot-target ] && cat $state/boot-target > $dev
+    fi
     echo auto > $state/mode
-    [ -s $state/boot-target ] && cat $state/boot-target > $dev
-    echo "automatic, target $(cat $dev) °C" ;;
-  *) echo "usage: ps5-fan status|target <N>|max|auto"; exit 2 ;;
+    echo "automatic, target $(get_target) °C" ;;
+  pwm)
+    [ -n "$hw" ] || { echo "this kernel's fan driver has no fixed speed (7.3 and later do)"; exit 2; }
+    case "$2" in ''|*[!0-9]*) echo "usage: ps5-fan pwm <0-255>"; exit 2 ;; esac
+    [ "$2" -le 255 ] || { echo "0-255"; exit 2; }
+    save_boot
+    echo 1 > $hw/pwm1_enable && echo "$2" > $hw/pwm1 || exit 1
+    echo "fixed $2" > $state/mode
+    echo "fan fixed at $2/255; \`ps5-fan auto\` to undo" ;;
+  *) echo "usage: ps5-fan status|target <N>|max|auto|pwm <N>"; exit 2 ;;
 esac

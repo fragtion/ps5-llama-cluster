@@ -252,7 +252,12 @@ The files are in [`system/`](system). Copy them on **both** consoles:
 cp system/sysctl.d/*.conf /etc/sysctl.d/          # min_free_kbytes, BBR, ARP (see the comments)
 cp system/modules-load.d/bbr.conf /etc/modules-load.d/
 cp system/zram-generator.conf /etc/systemd/       # compressed swap, half of RAM, zstd
-mkdir -p /root/bin && cp system/bin/ps5-fan /root/bin/   # fan control, see Temperatures below
+mkdir -p /root/bin && cp system/bin/ps5-fan system/bin/ps5-kernel /root/bin/   # see Temperatures and step 5
+mkdir -p /etc/systemd/system/ps5-stage-firmware.service.d   # boot ordering fix, see below
+cp system/systemd/ps5-stage-firmware.service.d/ordering.conf /etc/systemd/system/ps5-stage-firmware.service.d/
+mkdir -p /etc/systemd/system/ps5fan.service.d   # ps5_control --fan only on kernel 7.1, see Temperatures
+cp system/systemd/ps5fan.service.d/kernel-7.1-only.conf /etc/systemd/system/ps5fan.service.d/
+systemctl daemon-reload
 modprobe tcp_bbr && sysctl --system
 ```
 
@@ -266,6 +271,22 @@ modprobe tcp_bbr && sysctl --system
 - **`oom.conf`** is a systemd drop-in for the llama units in Part 1. Pinned GPU memory can't be
   swapped, so running out makes the kernel thrash for minutes instead of killing anything. This
   has systemd-oomd kill the model server first instead.
+- **`ps5-stage-firmware.service.d/ordering.conf`** makes the files above apply at boot. Without
+  it they may not. The image's `ps5-stage-firmware.service` (Wi-Fi firmware, from the `linux-ps5`
+  package) runs before `systemd-modules-load` but, as a normal service, after `sysinit.target`,
+  and that's an ordering cycle. To break it, systemd drops the start jobs for
+  `systemd-modules-load`, and on some boots also `systemd-sysctl` and `apparmor` (it varies), so
+  `/etc/sysctl.d` and `/etc/modules-load.d` aren't applied and no AppArmor profiles are loaded.
+  The `sysctl --system` above hides this until the next reboot. The drop-in turns it into an
+  early-boot unit. Upstream fixed it on 2026-11-08
+  ([ps5-linux-image#49](https://github.com/ps5-linux/ps5-linux-image/pull/49)). Images built
+  before then, such as `linux-ps5` 7.1.7, still need the drop-in. On a fixed image, and with
+  the `linux-ps5` 7.3.3 package (step 5), which ships the fixed unit, it changes nothing. To check, `systemd-analyze verify multi-user.target` should print no
+  "ordering cycle" lines. After a reboot, `journalctl -b | grep "ordering cycle"` should be
+  empty and `systemctl is-active systemd-sysctl apparmor` should print `active` twice.
+  `systemd-modules-load` may then show `failed`. That's because cups-filters'
+  `/etc/modules-load.d/cups-filters.conf` lists `lp` and `ppdev`, which the PS5 kernel doesn't
+  have. It's harmless: the remaining modules, `tcp_bbr` among them, still load.
 
 ### 4. If you cloned one console's drive for the other
 
@@ -282,6 +303,67 @@ rm -f /etc/ssh/ssh_host_* && ssh-keygen -A
 ```
 
 We name them **ps5a** (coordinator) and **ps5b** (worker). Part 2 relies on those hostnames.
+
+### 5. Kernel updates, without reflashing
+
+ps5-linux publishes each kernel as a `linux-ps5` deb on the
+[ps5-linux-patches releases](https://github.com/ps5-linux/ps5-linux-patches/releases), so a new
+kernel doesn't need a new image. [`ps5-kernel`](system/bin/ps5-kernel) installs one pinned
+release, currently **7.3.3** (`kernel-7.3.3-1472828`; the script checks the deb's SHA-256), and
+keeps the running kernel bootable:
+
+```bash
+ps5-kernel install    # 7.3.3 next to 7.1.7; the next jailbreak still boots 7.1.7
+ps5-kernel try        # soft reboot (kexec) into 7.3.3: no jailbreak needed
+ps5-kernel commit     # once 7.3.3 runs well: the next jailbreak boots it
+ps5-kernel            # running kernel, package, what the next jailbreak boots
+```
+
+Upgrade one console, give it a few days, then the other. If `try` hangs, power off and jailbreak:
+7.1.7 boots, as before. To go back, run `ps5-kernel rollback`, which makes the next jailbreak
+boot 7.1.7, then power off and jailbreak. Don't soft reboot into the older kernel:
+`ps5-kernel try` refuses to. We did it once. 7.1.7's Wi-Fi driver couldn't reach the IW620 chip
+that 7.3.3 had left running, `wpa_supplicant` hung holding the kernel's network lock, and
+NetworkManager, every new SSH session and keepalived hung behind it until a power cycle. Then,
+on 7.1.7, run `ps5-kernel rollback --package` to reinstall its package. If 7.3.3 is committed and won't boot,
+mount the drive's EFI partition (FAT, the second partition) on a PC: copy `bzImage-7.1.7` over
+`bzImage` and `initrd.img-7.1.7` over `initrd.img`. Once 7.3.3 has proven itself,
+`ps5-kernel forget` deletes 7.1.7's files. Needs 600 MB free on `/`: 7.3.3 takes 220 MB, and
+7.1.7's modules stay.
+
+Why not just `dpkg -i`:
+
+- The deb's postinst copies the new kernel over `/boot/efi/bzImage`, the file every jailbreak
+  boots, and keeps no copy of the old one.
+- The postinst takes the most recently changed directory in `/lib/modules` as the new kernel,
+  but dpkg deletes the old kernel's files after unpacking the new ones. `ps5-kernel` unpacks,
+  marks the new directory, and only then configures.
+- dpkg deletes the old kernel's modules, and a 7.1.7 without them boots without its GPU.
+  `ps5-kernel` keeps hard links to them in `/root/kernel-keep` and puts them back.
+- The image holds `linux-ps5`. `ps5-kernel` installs anyway, then holds it again.
+
+What 7.3.3 changes here, tested on ps5a on 2026-11-15 (pool, gateway, fan, dashboard):
+
+- **Speed:** the same as 7.1.7 with the same build: pp512 158.9 vs 158.6 t/s, pp4096 152.2
+  vs 152.2, tg128 21.26 vs 21.24, and llama-server with MTP 24.1 vs 24.1 t/s. Greedy output was
+  identical.
+- **Fan:** the kernel drives the fan itself, from a curve. `ps5-fan` and the dashboard handle
+  both kernels (see [Temperatures](#temperatures)).
+- **GPU clock:** a governor, `ps5-gpufreq` (500-2230 MHz), idles the GPU at 500 MHz and goes to
+  2230 MHz under load. It throttles from 85 °C on (`ps5_gpufreq.temp_limit`, 50-95), which the
+  benchmarks didn't reach (about 72 °C). GPU load, temperature and clock also show up in the
+  amdgpu hwmon. Under load its clock reads about 1860 MHz.
+- **GPU memory:** VRAM is the same 8 GiB. GTT, the system RAM the GPU can map, is now capped
+  at the console's RAM (6.7 GiB) instead of `ttm.pages_limit`'s 15.5 GiB, so Vulkan reports
+  15 GiB in all instead of 24. The same models, context sizes and pool split load as before.
+- **Clock:** the RTC driver reads the time from the console's counter plus a correction Sony
+  keeps in NVS, and saves a new correction once NTP has synced. On ps5a both 7.3.3 boots
+  started 49 minutes fast and saved the same −2972 s correction. The jailbreak in between seems
+  to have put Sony's value back. `ps5_rtc.write=0` in `/boot/efi/cmdline.txt` stops the writes.
+  The clock is then wrong until NTP, as on 7.1.7. 7.1.7 ignores the option.
+- **Fixes:** GPU hangs, panics and power-off; per-queue GPU reset without falling back to a full
+  reset (which the PS5 can't do).
+- **Boot ordering:** the package's `ps5-stage-firmware.service` has the fix from step 3.
 
 ---
 
@@ -704,6 +786,12 @@ changing models or builds, or move it to a [cache drive](#optional-a-cache-drive
 #### Reboots
 - **Any reboot drops the jailbreak,** including `systemctl reboot`. Someone has to re-run it at
   the console. Plan maintenance around that.
+- **A soft reboot keeps it.** `ps5-kernel try <version>`, like the image's
+  `/boot/efi/kexec.sh`, restarts Linux with kexec, without going back to the PS5's firmware.
+  From 7.1.7 into 7.3.3, SSH was back after about 40 s and the pool after about 4 minutes.
+  Only go into the same or a newer kernel: a soft reboot from 7.3.3 into 7.1.7 hung the
+  network (see [step 5](#5-kernel-updates-without-reflashing)). A hang there still means a
+  power cycle and the jailbreak.
 - **The clock jumps at boot.** The PS5 starts Linux with the clock from its last shutdown, and it
   jumps when NTP syncs. `llm-peerd` therefore times everything with a monotonic clock.
 
@@ -714,25 +802,32 @@ LAN clients, Wi-Fi clients included, reach the ethernet addresses and the VIP no
 
 #### Temperatures
 `cat /sys/class/hwmon/hwmon*/temp1_input` gives the CPU temperature in millidegrees (`k10temp`).
-Linux sees no GPU temperature and no fan speed.
+On kernel 7.1 Linux sees no GPU temperature and no fan speed. 7.3 adds the GPU's sensors and the
+fan's duty.
 Keep `ps5fan.service` enabled whenever `ps5boost.service` is: boost without the fan is asking
 for trouble.
 
-The console's fan controller holds the chip at a target temperature, 91 °C after
-`ps5_control --fan on`. That's why the fan stays quiet under load. [`ps5-fan`](system/bin/ps5-fan)
-changes it:
+How the fan is controlled depends on the kernel. [`ps5-fan`](system/bin/ps5-fan) handles both,
+and the dashboard's fan buttons call it:
 
 ```bash
-ps5-fan                 # chip temperature, target, mode, boost
-ps5-fan target 80       # spin up sooner and harder (0-100 °C)
+ps5-fan                 # chip temperature, target, mode, boost (on 7.3 also the duty and the curve)
+ps5-fan target 80       # spin up sooner and harder
 ps5-fan max             # full speed
 ps5-fan auto            # back to automatic and the target the console booted with
+ps5-fan pwm 150         # 7.3 only: a fixed duty, 0-255
 ```
 
-- **Every mode change resets the target.** `ps5_control --fan max` alone only sets it to 86 °C,
-  so `ps5-fan max` also sets 50 °C.
+- **Kernel 7.1:** the console's fan controller holds the chip at a target temperature, 91 °C
+  after `ps5_control --fan on` (`ps5fan.service`). That's why the fan stays quiet under load.
+  Every mode change resets the target. `ps5_control --fan max` alone only sets it to 86 °C, so
+  `ps5-fan max` also sets 50 °C. Targets go from 0 to 100 °C. Linux can't set a fixed speed.
+- **Kernel 7.3:** the kernel drives the fan from a curve on the SoC sensor. The fan runs at 10 %
+  at 50 °C and full speed at 87 °C, stops below 45 °C, and goes to full speed at 90 °C whatever
+  the curve says. Here the target is the curve's top point: `ps5-fan target 80` shifts the whole
+  curve so full speed comes at 80 °C (42-90). `ps5fan.service` skips itself on 7.3 (the
+  `ps5fan.service.d` drop-in), since the controller's servo pattern would fight the kernel.
 - **Nothing survives a reboot.**
-- **Linux can't set a fixed speed.**
 
 ---
 
@@ -740,13 +835,16 @@ ps5-fan auto            # back to automatic and the target the console booted wi
 
 ```
 system/                       Part 0: tuning for both consoles
-  bin/ps5-fan                   fan target / full speed / back to automatic
+  bin/ps5-fan                   fan target / full speed / back to automatic (kernel 7.1 and 7.3)
+  bin/ps5-kernel                kernel updates from ps5-linux-patches releases, with rollback
   sysctl.d/90-llm-memory.conf   vm.min_free_kbytes
   sysctl.d/91-llm-net.conf      BBR + fq, no slow start after idle
   sysctl.d/92-llm-arp.conf      ARP flux fix (ethernet + Wi-Fi in one subnet)
   modules-load.d/bbr.conf
   zram-generator.conf           compressed swap
   systemd/oom.conf              drop-in for the llama units: systemd-oomd kills them first
+  systemd/ps5-stage-firmware.service.d/ordering.conf   fixes a boot ordering cycle in the image
+  systemd/ps5fan.service.d/kernel-7.1-only.conf        ps5_control --fan only on kernel 7.1
 pool/                         Part 1: the simple pool
   etc/llm-pool                  -> /etc/default/llm-pool (the two addresses)
   bin/build-llama.sh            Vulkan + RPC build
@@ -755,6 +853,7 @@ pool/                         Part 1: the simple pool
   bin/run-rpc-server.sh         worker: ggml-rpc-server
   bin/run-llama-standalone.sh   either console alone
   bin/llm-mode                  switch modes
+  bin/wait-gpu                  run before each llama unit: waits until llama.cpp sees the GPU
   systemd/                      llama-pool, ggml-rpc, llama-qwen (standalone) units
 cluster/                      Part 2: the self-managing cluster
   etc/llm-cluster.yaml          the one config file

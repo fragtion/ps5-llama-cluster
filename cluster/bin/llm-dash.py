@@ -68,7 +68,7 @@ PORT = int(os.environ.get("PORT", "50080"))  # also the port the two dashboards 
 ALSO_PORTS = [int(p) for p in os.environ.get("ALSO_PORTS", "80").split(",") if p.strip()]
 HERE = Path(__file__).resolve().parent
 GPU = Path("/sys/class/drm/card0/device")
-FAN = Path("/sys/devices/platform/ps5-fan/target_temp")
+FAN = Path("/sys/devices/platform/ps5-fan/target_temp")  # kernel 7.1; 7.3 and later have the ps5_fan hwmon
 
 INTERVAL = 5
 HISTORY = collections.deque(maxlen=6 * 3600 // INTERVAL)
@@ -76,8 +76,10 @@ KEYS = ("t", "temp", "cpu", "load", "mem", "swap", "vram", "gtt",
         "disk_r", "disk_w", "link_rx", "link_tx", "wifi_rx", "wifi_tx", "busy")
 POOLED_UNIT = None if SINGLE else "llama-pool" if ROLE == "coordinator" else "ggml-rpc"
 POOLED_MODE = None if SINGLE else "pool" if ROLE == "coordinator" else "worker"
-UNITS = (("llama-qwen", "litellm", "ps5fan", "ps5boost") if SINGLE else
-         ("llm-peer", POOLED_UNIT, "llama-qwen", "litellm", "keepalived", "llm-config-watch", "ps5fan", "ps5boost"))
+# ps5fan.service (ps5_control --fan on) only does something on kernel 7.1; 7.3's kernel runs the fan itself
+FAN_UNIT = ("ps5fan",) if FAN.exists() else ()
+UNITS = (("llama-qwen", "litellm", *FAN_UNIT, "ps5boost") if SINGLE else
+         ("llm-peer", POOLED_UNIT, "llama-qwen", "litellm", "keepalived", "llm-config-watch", *FAN_UNIT, "ps5boost"))
 
 
 def read(path, default=""):
@@ -540,15 +542,31 @@ def startup():
     return None
 
 
-_fan = {"at": 0.0, "target": None}
+_fan = {"at": 0.0, "target": None, "pwm": None, "mode": None}
+
+
+def fan_hwmon():
+    for h in Path("/sys/class/hwmon").iterdir():
+        if read(h / "name") == "ps5_fan":
+            return h
+    return None
 
 
 def fan():
+    """Kernel 7.1: the controller's target temperature. 7.3 and later: the top of the kernel's fan
+    curve (where the fan reaches full speed), the mode and the fan's duty (0-255)."""
     # each read is a query to the console's controller: at most every 15 s
     if time.monotonic() - _fan["at"] > 15:
-        _fan.update(at=time.monotonic(), target=int(read(FAN, "0")) or None)
-    return {"target": _fan["target"],
-            "mode": read("/run/ps5-fan/mode", "auto"),
+        _fan.update(at=time.monotonic(), target=None, pwm=None, mode=None)
+        if FAN.exists():
+            _fan["target"] = int(read(FAN, "0")) or None
+        elif h := fan_hwmon():
+            _fan["target"] = int(read(h / "pwm1_auto_point8_temp", "0")) // 1000 or None
+            pwm = read(h / "pwm1")
+            _fan["pwm"] = int(pwm) if pwm.isdigit() else None
+            _fan["mode"] = {"0": "max", "1": "fixed", "2": "auto"}.get(read(h / "pwm1_enable"))
+    return {"target": _fan["target"], "pwm": _fan["pwm"],
+            "mode": _fan["mode"] or read("/run/ps5-fan/mode", "auto"),
             "boot_target": int(read("/run/ps5-fan/boot-target", "0")) or None}
 
 
@@ -635,7 +653,7 @@ def run_action(action, value):
     if action == "fan":
         if value in ("auto", "max"):
             cmd = ["/root/bin/ps5-fan", value]
-        elif str(value).isdigit() and 40 <= int(value) <= 95:
+        elif str(value).isdigit() and 40 <= int(value) <= 95:  # ps5-fan checks the kernel's own range
             cmd = ["/root/bin/ps5-fan", "target", str(value)]
         else:
             return 400, "fan: auto, max, or a target of 40-95 °C"
