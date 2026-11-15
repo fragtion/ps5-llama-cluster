@@ -570,7 +570,7 @@ ssh root@10.13.37.1 true     # from ps5b
 
 ```bash
 python3 -m venv /opt/litellm
-/opt/litellm/bin/pip install 'litellm[proxy]==1.106.3'
+/opt/litellm/bin/pip install 'litellm[proxy]==1.109.1'
 mkdir -p /etc/litellm /var/lib/litellm
 cp cluster/litellm/config.yaml cluster/litellm/vision_router.py /etc/litellm/
 install -m 600 cluster/litellm/env.example /etc/litellm/env      # set the master key and the fallback
