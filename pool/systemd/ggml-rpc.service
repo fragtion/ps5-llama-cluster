@@ -5,6 +5,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# amdgpu may still be loading at boot; without a GPU llama.cpp would run on the CPU instead of failing
+ExecStartPre=/root/bin/wait-gpu
+TimeoutStartSec=180
 ExecStart=/root/bin/run-rpc-server.sh
 WorkingDirectory=/root/llm/master
 Restart=on-failure

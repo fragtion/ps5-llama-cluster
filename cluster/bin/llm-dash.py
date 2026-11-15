@@ -508,6 +508,14 @@ def units():
     return {u: found[u] for u in UNITS if u in found}
 
 
+def healthy():
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:1234/health", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def startup():
     """The llama-server that is starting here, if one is: how long it has been at it, how long the last
     good start took, and the error the last attempt (or this one) ended with."""
@@ -518,6 +526,10 @@ def startup():
         u, mono = p.get("Id", "").removesuffix(".service"), int(p.get("ExecMainStartTimestampMonotonic") or 0)
         if u not in LOGS or p.get("ActiveState") not in ("active", "activating") or not mono:
             continue
+        # serving: the server's word beats the log's times, which go wrong when NTP moves the clock
+        # after the last line (the PS5 boots with the clock it had at shutdown)
+        if p.get("ActiveState") == "active" and healthy():
+            return None
         log, since = LOGS[u], time.monotonic() - mono / 1e6
         # the log may not have this run's first line yet: then it still describes the run before
         fresh = log.base is not None and log.base >= time.time() - since - 5

@@ -1,0 +1,22 @@
+#!/bin/sh
+# ExecStartPre of the llama.cpp units: wait until llama.cpp sees a Vulkan GPU. At boot amdgpu can still
+# be initialising when multi-user.target starts them, and llama-server then runs on the CPU instead of
+# failing, so Restart= never tries again. Gives up after WAIT_GPU seconds (default 120): the unit fails
+# and systemd restarts it.
+LD_LIBRARY_PATH=/root/llm/master/build/bin
+export LD_LIBRARY_PATH
+limit=${WAIT_GPU:-120}
+end=$(( $(cut -d. -f1 /proc/uptime) + limit ))  # uptime, not the clock: NTP moves the clock after boot
+said=
+while :; do
+  if dev=$(timeout 20 /root/llm/master/build/bin/llama-server --list-devices 2>/dev/null | grep -m1 -E '^ *Vulkan[0-9]+:'); then
+    echo "wait-gpu: ready:$dev"
+    exit 0
+  fi
+  if [ "$(cut -d. -f1 /proc/uptime)" -ge "$end" ]; then
+    echo "wait-gpu: no Vulkan GPU after ${limit} s"
+    exit 1
+  fi
+  [ -z "$said" ] && echo "wait-gpu: waiting for the Vulkan GPU (amdgpu still loading?)" && said=1
+  sleep 3
+done
