@@ -346,8 +346,11 @@ mkdir -p /root/bin /root/logs && cp pool/bin/* /root/bin/ && chmod +x /root/bin/
 /root/bin/build-llama.sh
 ```
 
-- **The source.** The script builds upstream llama.cpp at the commit we tested (`5f5acfe`,
-  2026-10-22). Newer commits should work if they still accept every flag the run scripts use.
+- **The source.** The script builds upstream llama.cpp at the commit we tested (`5c008e0`,
+  2026-11-15, v1.0.0 plus 47 commits). Newer commits should work if they still accept every flag
+  the run scripts use. Against the October build (`5f5acfe`) it read prompts ~3.5% faster and
+  generated ~3% faster with MTP on ps5a alone. It also changed the RPC protocol, so a console on
+  the old build can't pool with one on the new.
   The script's header also shows how to add the ternary quantisation types from
   [fragtion/llama.cpp](https://github.com/fragtion/llama.cpp)'s `ternary-pq2-ptq` branch; the
   models here don't need them.

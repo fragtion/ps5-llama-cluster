@@ -6,7 +6,7 @@
 # SCHED_MAX_COPIES=2 halves the pipeline-parallel compute buffers (default 4) at no measured speed cost.
 set -e
 REPO=${REPO:-https://github.com/ggml-org/llama.cpp}
-REF=${REF:-5f5acfe2504b490386cd03020202f59e36861add}
+REF=${REF:-5c008e00085f4d3e394f9a1be649284999de1326}
 mkdir -p /root/llm/master /root/logs
 cd /root/llm/master
 [ -d .git ] || git init -q
