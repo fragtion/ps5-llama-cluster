@@ -10,7 +10,8 @@ Environment=LITELLM_LOCAL_MODEL_COST_MAP=True LITELLM_LOG=ERROR
 WorkingDirectory=/etc/litellm
 ExecStart=/opt/litellm/bin/litellm --config /etc/litellm/config.yaml --host 0.0.0.0 --port 4000 --num_workers 1
 Restart=on-failure
-RestartSec=10
+# it is the first thing the OOM killer takes: come back fast, the gateway refuses connections until then
+RestartSec=1
 # host RAM is what llama-server runs out of: cap the gateway and let the kernel take it first
 MemoryMax=600M
 OOMScoreAdjust=800

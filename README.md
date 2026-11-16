@@ -523,7 +523,7 @@ hostnamectl set-hostname ps5a            # ps5b on the other one: must match the
 cp cluster/bin/* /root/bin/ && chmod +x /root/bin/*      # replaces llm-mode and two run scripts
 ln -sfn llm_cluster.py /root/bin/llm-cluster
 cp cluster/etc/llm-cluster.yaml /etc/                    # edit: link subnet, VIP, interface
-cp cluster/systemd/* /etc/systemd/system/                # .service and .timer units
+cp -r cluster/systemd/* /etc/systemd/system/             # .service and .timer units, keepalived drop-in
 gcc -O2 -o /root/bin/rpc-cache-check cluster/src/rpc-cache-check.c
 mkdir -p /mnt/llamacache                                 # optional cache drive (see below)
 echo 'LABEL=LLAMACACHE /mnt/llamacache ext4 noatime,nofail,x-systemd.device-timeout=5s 0 2' >> /etc/fstab

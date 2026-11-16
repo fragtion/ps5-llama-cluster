@@ -107,6 +107,10 @@ global_defs {{
     router_id {cfg['self']['name']}
     enable_script_security
     script_user root
+    # GPU allocations can run host RAM out; the reclaim stall then delayed adverts past the 3 s
+    # master-down time and moved the VIP back and forth. Keep VRRP in RAM (takes a restart of
+    # keepalived, not a reload); keepalived.service.d/realtime.conf runs it real-time.
+    vrrp_no_swap
 }}
 
 vrrp_instance gateway {{
