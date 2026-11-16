@@ -12,6 +12,10 @@ cd /root/llm/master
 [ -d .git ] || git init -q
 git fetch -q --depth 1 "$REPO" "$REF"
 git checkout -q --detach FETCH_HEAD
+# our fixes on top (pool/patches next to this script's bin/): the FA dequant scratch cap
+for p in "$(dirname "$(readlink -f "$0")")"/../patches/*.patch; do
+  [ -e "$p" ] && git apply "$p" && echo "applied $(basename "$p")"
+done
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_RPC=ON -DGGML_SCHED_MAX_COPIES=2 \
   > /root/logs/build.log 2>&1
 cmake --build build --config Release -j "$(nproc)" >> /root/logs/build.log 2>&1

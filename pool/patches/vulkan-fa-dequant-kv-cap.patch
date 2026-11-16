@@ -1,0 +1,22 @@
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 2e51051..890206f 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -8701,7 +8701,17 @@ void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx, const
+     const uint32_t cm2_min_reuse = KV >= 8192 ? 4096 : 8192;
+     // Query reuse must cover the conversion and synchronization cost.
+     const bool cm2_dequant_kv = KV >= 4096 && neq1 >= cm2_min_queries && (uint64_t) neq1 * qk_ratio >= cm2_min_reuse;
++    // The scratch is sized by the whole KV view and only ever grows, so at long contexts it pins
++    // n_kv * (K + V rows in f16) per device on top of the cache itself (4 KiB per cell for 4 KV heads
++    // x 256), which ran 16 GB consoles out of memory. GGML_VK_FA_DEQUANT_KV_MAX_MB caps it; above the
++    // cap FA reads the quantized cache directly. Unset or 0: no cap.
++    static const uint64_t dequant_kv_max = [] {
++        const char * s = getenv("GGML_VK_FA_DEQUANT_KV_MAX_MB");
++        const uint64_t mb = s ? std::strtoull(s, nullptr, 10) : 0;
++        return mb ? mb * 1024 * 1024 : UINT64_MAX;
++    }();
+     const bool use_dequant_kv = ((k_quant && v_quant) || kv_raw_strided) && neq1 >= 64 &&
++                                dequant_kv_sz <= dequant_kv_max &&
+                                 is_dense_kv_cache(k) && is_dense_kv_cache(v) &&
+                                 (uint64_t)ggml_nelements(k) * kv_scratch_ts <= ctx->device->properties.limits.maxStorageBufferRange &&
+                                 (uint64_t)ggml_nelements(v) * kv_scratch_ts <= ctx->device->properties.limits.maxStorageBufferRange &&

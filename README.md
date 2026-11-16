@@ -480,7 +480,7 @@ The OpenAI-compatible API and llama.cpp's web UI are now at `http://<ps5a>:1234`
 | `--rpc <worker>:50052 -ts 60,40` | Index 0 is the RPC device (the worker), so it takes 60% of the layers. The coordinator keeps the output head, the MTP draft layer and the vision projector, so it gets the smaller share. |
 | `--mmproj-device Vulkan0` | Keep vision on the coordinator; it otherwise follows the first device, the worker. |
 | `-c 262144 -ctk q8_0 -ctv q8_0 -fa on` | Full context, q8_0 KV cache. |
-| `--cache-ram 0 --ctx-checkpoints 2` | The prompt cache and context checkpoints live in host RAM, and there is ~1 GB of it to spare. The defaults (8 GiB cache, 32 × 150 MiB checkpoints) got llama-server OOM-killed at ~37K tokens. |
+| `--cache-ram 0 --ctx-checkpoints 1` | The prompt cache and context checkpoints live in host RAM, and there is ~1 GB of it to spare. The defaults (8 GiB cache, 32 × 150 MiB checkpoints) got llama-server OOM-killed at ~37K tokens. Each slot keeps one checkpoint: in 289 long requests every resume used the newest one, and a second cost another 150 MiB per slot. |
 | `-np 2 -kvu -sps 0.5` | Two slots share one KV pool, so a side request (a chat title, a subagent) doesn't evict the main conversation. At the default `-sps 0.10`, a short side request matched the main slot on template tokens alone and wiped its context. |
 | `--spec-type draft-mtp --spec-draft-n-max 3 --spec-draft-n-ubatch 128` | Speculative decoding with the model's own MTP layer. |
 | `--load-mode none` | Don't mmap or prefetch from disk: load once, keep resident. |
@@ -836,7 +836,8 @@ system/                       Part 0: tuning for both consoles
   systemd/ps5fan.service.d/kernel-7.1-only.conf        ps5_control --fan only on kernel 7.1
 pool/                         Part 1: the simple pool
   etc/llm-pool                  -> /etc/default/llm-pool (the two addresses)
-  bin/build-llama.sh            Vulkan + RPC build
+  bin/build-llama.sh            Vulkan + RPC build, with patches/ applied
+  patches/vulkan-fa-dequant-kv-cap.patch   GGML_VK_FA_DEQUANT_KV_MAX_MB: caps the FA K/V scratch
   bin/fetch-models.sh           models from Hugging Face, checksummed
   bin/run-llama-pool.sh         coordinator: the pooled llama-server
   bin/run-rpc-server.sh         worker: ggml-rpc-server
