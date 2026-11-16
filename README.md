@@ -252,6 +252,7 @@ The files are in [`system/`](system). Copy them on **both** consoles:
 cp system/sysctl.d/*.conf /etc/sysctl.d/          # min_free_kbytes, BBR, ARP (see the comments)
 cp system/modules-load.d/bbr.conf /etc/modules-load.d/
 cp system/zram-generator.conf /etc/systemd/       # compressed swap, half of RAM, zstd
+cp system/udev/90-ps5-gpufreq.rules /etc/udev/rules.d/   # GPU at its top clock (kernel 7.3), see step 5
 mkdir -p /root/bin && cp system/bin/ps5-fan system/bin/ps5-kernel /root/bin/   # see Temperatures and step 5
 mkdir -p /etc/systemd/system/ps5-stage-firmware.service.d   # boot ordering fix, see below
 cp system/systemd/ps5-stage-firmware.service.d/ordering.conf /etc/systemd/system/ps5-stage-firmware.service.d/
@@ -259,6 +260,7 @@ mkdir -p /etc/systemd/system/ps5fan.service.d   # ps5_control --fan only on kern
 cp system/systemd/ps5fan.service.d/kernel-7.1-only.conf /etc/systemd/system/ps5fan.service.d/
 systemctl daemon-reload
 modprobe tcp_bbr && sysctl --system
+udevadm trigger -s devfreq -c add   # applies the GPU governor now; no-op on kernel 7.1
 ```
 
 - **`90-llm-memory.conf`** keeps 128 MiB free for the kernel, networking and sshd when GPU
@@ -337,10 +339,13 @@ What 7.3.3 changes here, tested on ps5a on 2026-11-15 (pool, gateway, fan, dashb
   identical.
 - **Fan:** the kernel drives the fan itself, from a curve. `ps5-fan` and the dashboard handle
   both kernels (see [Temperatures](#temperatures)).
-- **GPU clock:** a governor, `ps5-gpufreq` (500-2230 MHz), idles the GPU at 500 MHz and goes to
-  2230 MHz under load. It throttles from 85 °C on (`ps5_gpufreq.temp_limit`, 50-95), which the
-  benchmarks didn't reach (about 72 °C). GPU load, temperature and clock also show up in the
-  amdgpu hwmon. Under load its clock reads about 1860 MHz.
+- **GPU clock:** the `ps5-gpufreq` devfreq device (500-2230 MHz) defaults to `simple_ondemand`,
+  which samples load every 50 ms. That suits one busy GPU, but in the pool each GPU waits while
+  the other computes: decode spent ~60% of the time below 2230 MHz (40% at 500) and ran 9.5 t/s
+  instead of 16.8 for the same request. [`90-ps5-gpufreq.rules`](system/udev/90-ps5-gpufreq.rules)
+  sets the `performance` governor, which holds 2230 MHz, idle included (7.1 had a fixed 2000).
+  It still throttles from 85 °C on (`ps5_gpufreq.temp_limit`, 50-95), which the benchmarks didn't
+  reach (about 72 °C). GPU load, temperature and clock also show up in the amdgpu hwmon.
 - **GPU memory:** VRAM is the same 8 GiB. GTT, the system RAM the GPU can map, is now capped
   at the console's RAM (6.7 GiB) instead of `ttm.pages_limit`'s 15.5 GiB, so Vulkan reports
   15 GiB in all instead of 24. The same models, context sizes and pool split load as before.
@@ -830,6 +835,7 @@ system/                       Part 0: tuning for both consoles
   sysctl.d/91-llm-net.conf      BBR + fq, no slow start after idle
   sysctl.d/92-llm-arp.conf      ARP flux fix (ethernet + Wi-Fi in one subnet)
   modules-load.d/bbr.conf
+  udev/90-ps5-gpufreq.rules     GPU governor: performance (top clock; pool decode needs it)
   zram-generator.conf           compressed swap
   systemd/oom.conf              drop-in for the llama units: systemd-oomd kills them first
   systemd/ps5-stage-firmware.service.d/ordering.conf   fixes a boot ordering cycle in the image

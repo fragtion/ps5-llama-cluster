@@ -1,0 +1,5 @@
+# Hold the GPU at its top clock (2230 MHz; the driver still throttles from ps5_gpufreq.temp_limit).
+# Kernel 7.3's default governor, simple_ondemand, samples load every 50 ms. In the pool each GPU
+# waits while the other computes, so it read the load as low and spent ~60% of decode below 2230 MHz,
+# 40% at 500: 9.5 t/s instead of 16.8 for the same request.
+ACTION=="add", SUBSYSTEM=="devfreq", KERNEL=="ps5-gpufreq", ATTR{governor}="performance"
