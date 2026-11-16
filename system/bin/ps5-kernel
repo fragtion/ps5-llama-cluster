@@ -2,76 +2,49 @@
 # Kernel updates for a PS5 running the ps5-linux image, without reflashing the drive. Installs one
 # pinned release of github.com/ps5-linux/ps5-linux-patches; the deb's checksum is checked before
 # anything changes.
-#   ps5-kernel [status]        running kernel, installed package, what the next jailbreak boots
-#   ps5-kernel install         install the pinned kernel next to the running one. The next jailbreak
-#                              still boots the running one.
-#   ps5-kernel try [VER]       soft reboot (kexec) into VER, the pinned kernel by default. No jailbreak
-#                              needed. If it hangs: power off, jailbreak, and the old kernel boots.
-#                              Only into the same or a newer kernel: 7.3.3 -> 7.1.7 left the Wi-Fi
-#                              chip (IW620) unanswering, and that wedged the network stack.
-#   ps5-kernel commit [VER]    make the next jailbreak boot VER
-#   ps5-kernel rollback        make the next jailbreak boot the kernel that ran before `install`
-#   ps5-kernel rollback --package   also reinstall that kernel's package (run it booted on that kernel)
-#   ps5-kernel forget          delete the old kernel's files, once the new one has proven itself
-# The jailbreak boots /boot/efi/bzImage and initrd.img. Every kernel this script handles also has a
-# copy there as bzImage-<version> and initrd.img-<version>. So from a PC, with the drive's EFI
-# partition (FAT) mounted, rolling back is copying bzImage-7.1.7 over bzImage and initrd.img-7.1.7
-# over initrd.img.
+#   ps5-kernel [status]   running kernel, installed package, what the next jailbreak boots
+#   ps5-kernel install    install the pinned kernel in place of the running one; the next jailbreak
+#                         boots it
+#   ps5-kernel try        soft reboot (kexec) into the kernel the next jailbreak boots. No jailbreak
+#                         needed.
+# The jailbreak boots /boot/efi/bzImage and initrd.img; the deb's postinst copies the new kernel there.
 set -e
 
-NEW_VER=7.3.3 NEW_TAG=kernel-7.3.3-1472828
-NEW_SHA=b5ee7308d73265d7f1d40d7c6bbf98d7aa4dc45451b2639ff854843b9d25a569
-OLD_VER=7.1.7 OLD_TAG=kernel-7.1.7-56922cf   # the image's kernel: its package, for rollback --package
-OLD_SHA=81da2aa82011dadd0c96a6aff564fffc472b100f8972a6fcab9e9bc75d9bf768
+VER=7.3.3 TAG=kernel-7.3.3-1472828
+SHA=b5ee7308d73265d7f1d40d7c6bbf98d7aa4dc45451b2639ff854843b9d25a569
 
 EFI=/boot/efi
-KEEP=/root/kernel-keep   # hard links to the old kernel's files, which dpkg deletes on upgrade
 DEBS=/root/kernel-debs
 
 die() { echo "ps5-kernel: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" = 0 ] || die "run as root"; }
 free_mb() { echo $(( $(df --output=avail -k "$1" | tail -1) / 1024 )); }
 
-# fetch TAG VERSION SHA256: the release's deb in $DEBS, checked; prints its path
+# fetch: the pinned release's deb in $DEBS, checked; prints its path
 fetch() {
-  f=$DEBS/linux-ps5_$2_amd64.deb
+  f=$DEBS/linux-ps5_${VER}_amd64.deb
   mkdir -p $DEBS
-  if ! echo "$3  $f" | sha256sum -c --status > /dev/null 2>&1; then
-    echo "downloading linux-ps5 $2 ($1)" >&2
-    wget -q -O "$f.part" "https://github.com/ps5-linux/ps5-linux-patches/releases/download/$1/linux-ps5_$2_amd64.deb" ||
+  if ! echo "$SHA  $f" | sha256sum -c --status > /dev/null 2>&1; then
+    echo "downloading linux-ps5 $VER ($TAG)" >&2
+    wget -q -O "$f.part" "https://github.com/ps5-linux/ps5-linux-patches/releases/download/$TAG/linux-ps5_${VER}_amd64.deb" ||
       { rm -f "$f.part"; die "download failed"; }
-    echo "$3  $f.part" | sha256sum -c --status || { rm -f "$f.part"; die "$f: wrong checksum"; }
+    echo "$SHA  $f.part" | sha256sum -c --status || { rm -f "$f.part"; die "$f: wrong checksum"; }
     mv "$f.part" "$f"
   fi
   echo "$f"
 }
 
-# install_deb DEB VERSION: what `dpkg -i` does, but the postinst takes the newest directory in
-# /lib/modules as the kernel to set up, and dpkg deletes the old kernel's files after unpacking the
-# new ones. So make sure the new kernel's directory is the newest.
+# install_deb DEB: what `dpkg -i` does, but the postinst takes the newest directory in /lib/modules
+# as the kernel to set up, so make sure the new kernel's directory is the newest before configuring.
 install_deb() {
   export DEBIAN_FRONTEND=noninteractive
   dpkg --force-hold --unpack "$1"
-  touch /lib/modules/$2
+  touch /lib/modules/$VER
   dpkg --force-hold --configure linux-ps5
   echo "linux-ps5 hold" | dpkg --set-selections   # the image holds it, so apt leaves the kernel alone
 }
 
-# boot VER: the next jailbreak boots VER (from its copy on the EFI partition)
-boot() {
-  [ -s $EFI/bzImage-$1 ] && [ -s $EFI/initrd.img-$1 ] || die "no $EFI/bzImage-$1 and initrd.img-$1"
-  cp $EFI/bzImage-$1 $EFI/bzImage.new && cp $EFI/initrd.img-$1 $EFI/initrd.img.new
-  mv $EFI/bzImage.new $EFI/bzImage && mv $EFI/initrd.img.new $EFI/initrd.img
-  sync
-  cmp -s $EFI/bzImage $EFI/bzImage-$1 && cmp -s $EFI/initrd.img $EFI/initrd.img-$1 ||
-    die "$EFI/bzImage or initrd.img doesn't match the $1 copy: check before the next jailbreak!"
-  echo "the next jailbreak boots $1"
-}
-
 booting() {   # which kernel /boot/efi/bzImage is
-  for f in $EFI/bzImage-*; do
-    [ -e "$f" ] && cmp -s $EFI/bzImage "$f" && { echo "${f#$EFI/bzImage-}"; return; }
-  done
   for f in /boot/vmlinuz-*; do
     [ -e "$f" ] && cmp -s $EFI/bzImage "$f" && { echo "${f#/boot/vmlinuz-}"; return; }
   done
@@ -83,95 +56,27 @@ case "${1:-status}" in
     echo "running   $(uname -r)"
     echo "package   linux-ps5 $(dpkg-query -W -f='${Version} (${db:Status-Abbrev})' linux-ps5 2>/dev/null)"
     echo "next boot $(booting) (/boot/efi/bzImage)"
-    copies=$(cd $EFI && ls bzImage-* 2>/dev/null | sed 's/bzImage-//' | tr '\n' ' ')
-    echo "on EFI    ${copies:-none yet (\`install\` adds bzImage-<version> copies)}"
-    if [ -s $KEEP/old ]; then echo "kept      $(cat $KEEP/old), for rollback (\`ps5-kernel forget\` deletes it)"; fi
-    echo "pinned    $NEW_VER ($NEW_TAG)" ;;
+    echo "pinned    $VER ($TAG)" ;;
 
   install)
     need_root
-    cur=$(uname -r)
-    [ "$cur" != $NEW_VER ] || die "already running $NEW_VER"
-    [ ! -e /lib/modules/$NEW_VER ] || die "/lib/modules/$NEW_VER exists already (ps5-kernel status)"
+    [ "$(uname -r)" != $VER ] || die "already running $VER"
+    [ ! -e /lib/modules/$VER ] || die "/lib/modules/$VER exists already (ps5-kernel status)"
     mountpoint -q $EFI || die "$EFI isn't mounted"
-    cmp -s /boot/vmlinuz-$cur $EFI/bzImage || die "$EFI/bzImage isn't the running kernel (/boot/vmlinuz-$cur)"
     [ "$(free_mb /)" -ge 600 ] || die "needs 600 MB free on /, has $(free_mb /)"
-    [ "$(free_mb $EFI)" -ge 150 ] || die "needs 150 MB free on $EFI, has $(free_mb $EFI)"
-    deb=$(fetch $NEW_TAG $NEW_VER $NEW_SHA)
-    if [ "$cur" = $OLD_VER ]; then fetch $OLD_TAG $OLD_VER $OLD_SHA > /dev/null; fi   # for rollback --package
-
-    # keep the running kernel: the files that booted it, and its modules (hard links, no extra space)
-    [ -e $EFI/bzImage-$cur ] || cp $EFI/bzImage $EFI/bzImage-$cur
-    [ -e $EFI/initrd.img-$cur ] || cp $EFI/initrd.img $EFI/initrd.img-$cur
-    rm -rf $KEEP/$cur; mkdir -p $KEEP/$cur/modules $KEEP/$cur/boot
-    for f in /lib/modules/$cur/*; do [ "${f##*/}" = build ] || cp -al "$f" $KEEP/$cur/modules/; done
-    for f in vmlinuz System.map config initrd.img; do
-      if [ -e /boot/$f-$cur ]; then ln -f /boot/$f-$cur $KEEP/$cur/boot/; fi
-    done
-    echo $cur > $KEEP/old
-
-    # the postinst copies the new kernel to bzImage: whatever happens, the next jailbreak boots $cur
-    trap 'boot $cur > /dev/null || echo "ps5-kernel: CHECK $EFI/bzImage BEFORE THE NEXT JAILBREAK" >&2' EXIT
-    install_deb "$deb" $NEW_VER
-    cmp -s /boot/vmlinuz-$NEW_VER $EFI/bzImage || die "the postinst didn't set up $NEW_VER"
-    cp /boot/vmlinuz-$NEW_VER $EFI/bzImage-$NEW_VER
-    cp /boot/initrd.img-$NEW_VER $EFI/initrd.img-$NEW_VER
-
-    # dpkg deleted the old kernel's files: put them back, so it can still boot
-    mkdir -p /lib/modules/$cur
-    cp -alf $KEEP/$cur/modules/. /lib/modules/$cur/
-    for f in $KEEP/$cur/boot/*; do if [ ! -e /boot/${f##*/} ]; then ln $f /boot/; fi; done
-    trap - EXIT
-    boot $cur
+    [ "$(free_mb $EFI)" -ge 50 ] || die "needs 50 MB free on $EFI, has $(free_mb $EFI)"
+    install_deb "$(fetch)"
+    cmp -s /boot/vmlinuz-$VER $EFI/bzImage && cmp -s /boot/initrd.img-$VER $EFI/initrd.img ||
+      die "the postinst didn't set up $VER: check $EFI/bzImage and initrd.img before the next jailbreak!"
     echo
-    echo "installed $NEW_VER next to $cur. Next:"
-    echo "  ps5-kernel try       soft reboot into $NEW_VER (if it hangs: power off, jailbreak, $cur boots)"
-    echo "  ps5-kernel commit    once $NEW_VER runs well: the next jailbreak boots it" ;;
+    echo "installed $VER; the next jailbreak boots it. To switch now: ps5-kernel try" ;;
 
   try)
     need_root
-    v=${2:-$NEW_VER}
-    [ -s $EFI/bzImage-$v ] && [ -s $EFI/initrd.img-$v ] || die "no $EFI/bzImage-$v and initrd.img-$v"
-    # an older kernel's drivers may not take over hardware a newer one left running: 7.1.7's moal
-    # couldn't reach the IW620 after 7.3.3, wpa_supplicant hung holding the network lock, and
-    # NetworkManager, sshd and keepalived hung behind it. Going back takes a cold boot.
-    if [ "$(printf '%s\n' "$v" "$(uname -r)" | sort -V | head -1)" = "$v" ] && [ "$v" != "$(uname -r)" ] &&
-       [ "${3:-}" != --force ]; then
-      die "$v is older than the running $(uname -r): use \`ps5-kernel commit $v\`, power off and jailbreak"
-    fi
-    kexec -l $EFI/bzImage-$v --initrd=$EFI/initrd.img-$v --command-line="$(cat $EFI/cmdline.txt)"
-    echo "soft reboot into $v (kexec); the next jailbreak still boots $(booting)"
+    [ -s $EFI/bzImage ] && [ -s $EFI/initrd.img ] || die "no $EFI/bzImage and initrd.img"
+    kexec -l $EFI/bzImage --initrd=$EFI/initrd.img --command-line="$(cat $EFI/cmdline.txt)"
+    echo "soft reboot into $(booting) (kexec)"
     systemctl kexec ;;
 
-  commit)
-    need_root
-    boot "${2:-$NEW_VER}" ;;
-
-  rollback)
-    need_root
-    old=$(cat $KEEP/old 2>/dev/null) || die "nothing kept to roll back to"
-    boot $old
-    if [ "$(uname -r)" != "$old" ]; then
-      echo "to get there: power off and jailbreak (not \`try\`: a soft reboot into an older kernel hangs)"
-    fi
-    if [ "${2:-}" = --package ]; then
-      [ "$(uname -r)" = "$old" ] || die "boot $old first (power off and jailbreak), then rollback --package"
-      [ "$old" = $OLD_VER ] || die "no pinned package for $old"
-      deb=$(fetch $OLD_TAG $OLD_VER $OLD_SHA)
-      install_deb "$deb" $OLD_VER
-      cmp -s /boot/vmlinuz-$OLD_VER $EFI/bzImage || die "the postinst didn't set up $OLD_VER: check $EFI/bzImage!"
-      rm -rf $KEEP/$old $KEEP/old
-      echo "linux-ps5 $OLD_VER reinstalled; $EFI/bzImage-$NEW_VER is left for another try"
-    fi ;;
-
-  forget)
-    need_root
-    old=$(cat $KEEP/old 2>/dev/null) || die "nothing kept"
-    [ "$(uname -r)" != "$old" ] || die "running $old"
-    [ "$(booting)" != "$old" ] || die "the next jailbreak boots $old"
-    rm -rf /lib/modules/$old $KEEP/$old $KEEP/old /boot/vmlinuz-$old /boot/System.map-$old \
-      /boot/config-$old /boot/initrd.img-$old $EFI/bzImage-$old $EFI/initrd.img-$old
-    echo "deleted kernel $old (its deb stays in $DEBS)" ;;
-
-  *) echo "usage: ps5-kernel status|install|try [VER]|commit [VER]|rollback [--package]|forget"; exit 2 ;;
+  *) echo "usage: ps5-kernel status|install|try"; exit 2 ;;
 esac

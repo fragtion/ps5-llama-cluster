@@ -309,37 +309,25 @@ We name them **ps5a** (coordinator) and **ps5b** (worker). Part 2 relies on thos
 ps5-linux publishes each kernel as a `linux-ps5` deb on the
 [ps5-linux-patches releases](https://github.com/ps5-linux/ps5-linux-patches/releases), so a new
 kernel doesn't need a new image. [`ps5-kernel`](system/bin/ps5-kernel) installs one pinned
-release, currently **7.3.3** (`kernel-7.3.3-1472828`; the script checks the deb's SHA-256), and
-keeps the running kernel bootable:
+release, currently **7.3.3** (`kernel-7.3.3-1472828`; the script checks the deb's SHA-256), in
+place of the running one:
 
 ```bash
-ps5-kernel install    # 7.3.3 next to 7.1.7; the next jailbreak still boots 7.1.7
-ps5-kernel try        # soft reboot (kexec) into 7.3.3: no jailbreak needed
-ps5-kernel commit     # once 7.3.3 runs well: the next jailbreak boots it
+ps5-kernel install    # install 7.3.3; the next jailbreak boots it
+ps5-kernel try        # soft reboot (kexec) into it now: no jailbreak needed
 ps5-kernel            # running kernel, package, what the next jailbreak boots
 ```
 
-Upgrade one console, give it a few days, then the other. If `try` hangs, power off and jailbreak:
-7.1.7 boots, as before. To go back, run `ps5-kernel rollback`, which makes the next jailbreak
-boot 7.1.7, then power off and jailbreak. Don't soft reboot into the older kernel:
-`ps5-kernel try` refuses to. We did it once. 7.1.7's Wi-Fi driver couldn't reach the IW620 chip
-that 7.3.3 had left running, `wpa_supplicant` hung holding the kernel's network lock, and
-NetworkManager, every new SSH session and keepalived hung behind it until a power cycle. Then,
-on 7.1.7, run `ps5-kernel rollback --package` to reinstall its package. If 7.3.3 is committed and won't boot,
-mount the drive's EFI partition (FAT, the second partition) on a PC: copy `bzImage-7.1.7` over
-`bzImage` and `initrd.img-7.1.7` over `initrd.img`. Once 7.3.3 has proven itself,
-`ps5-kernel forget` deletes 7.1.7's files. Needs 600 MB free on `/`: 7.3.3 takes 220 MB, and
-7.1.7's modules stay.
+Needs 600 MB free on `/`. Kernels only move forward: never soft reboot into an older kernel. Its
+Wi-Fi driver may not take over the IW620 chip a newer kernel left running, and then
+`wpa_supplicant` hangs holding the kernel's network lock, with NetworkManager, every new SSH
+session and keepalived stuck behind it until a power cycle.
 
 Why not just `dpkg -i`:
 
-- The deb's postinst copies the new kernel over `/boot/efi/bzImage`, the file every jailbreak
-  boots, and keeps no copy of the old one.
 - The postinst takes the most recently changed directory in `/lib/modules` as the new kernel,
   but dpkg deletes the old kernel's files after unpacking the new ones. `ps5-kernel` unpacks,
   marks the new directory, and only then configures.
-- dpkg deletes the old kernel's modules, and a 7.1.7 without them boots without its GPU.
-  `ps5-kernel` keeps hard links to them in `/root/kernel-keep` and puts them back.
 - The image holds `linux-ps5`. `ps5-kernel` installs anyway, then holds it again.
 
 What 7.3.3 changes here, tested on ps5a on 2026-11-15 (pool, gateway, fan, dashboard):
@@ -786,14 +774,11 @@ changing models or builds, or move it to a [cache drive](#optional-a-cache-drive
 #### Reboots
 - **Any reboot drops the jailbreak,** including `systemctl reboot`. Someone has to re-run it at
   the console. Plan maintenance around that.
-- **A soft reboot keeps it.** `ps5-kernel try <version>`, like the image's
-  `/boot/efi/kexec.sh`, restarts Linux with kexec, without going back to the PS5's firmware.
-  From 7.1.7 into 7.3.3, SSH was back after about 40 s and the pool after about 4 minutes.
-  From 7.3.3 into 7.3.3 it takes about 25 s, which makes it a quick way to pick up a glibc or
-  Mesa update.
-  Only go into the same or a newer kernel: a soft reboot from 7.3.3 into 7.1.7 hung the
-  network (see [step 5](#5-kernel-updates-without-reflashing)). A hang there still means a
-  power cycle and the jailbreak.
+- **A soft reboot keeps it.** `ps5-kernel try`, like the image's `/boot/efi/kexec.sh`,
+  restarts Linux with kexec, without going back to the PS5's firmware. Into a newer kernel, SSH
+  was back after about 40 s and the pool after about 4 minutes. Into the same kernel it takes
+  about 25 s, which makes it a quick way to pick up a glibc or Mesa update. Never into an older
+  kernel (see [step 5](#5-kernel-updates-without-reflashing)).
 - **The clock jumps at boot.** The PS5 starts Linux with the clock from its last shutdown, and it
   jumps when NTP syncs. `llm-peerd` therefore times everything with a monotonic clock.
 
@@ -829,7 +814,7 @@ ps5-fan pwm 150         # 7.3 only: a fixed duty, 0-255
   the curve says. Here the target is the curve's top point: `ps5-fan target 80` shifts the whole
   curve so full speed comes at 80 °C (42-90). `ps5fan.service` skips itself on 7.3 (the
   `ps5fan.service.d` drop-in), since the controller's servo pattern would fight the kernel.
-  Once 7.1 is gone (`ps5-kernel forget`), remove it: `systemctl disable ps5fan` and delete
+  With no 7.1 left, it can go: `systemctl disable ps5fan` and delete
   `/etc/systemd/system/ps5fan.service` and its drop-in. `ps5boost.service` stays.
 - **Nothing survives a reboot.**
 
@@ -840,7 +825,7 @@ ps5-fan pwm 150         # 7.3 only: a fixed duty, 0-255
 ```
 system/                       Part 0: tuning for both consoles
   bin/ps5-fan                   fan target / full speed / back to automatic (kernel 7.1 and 7.3)
-  bin/ps5-kernel                kernel updates from ps5-linux-patches releases, with rollback
+  bin/ps5-kernel                kernel updates from ps5-linux-patches releases
   sysctl.d/90-llm-memory.conf   vm.min_free_kbytes
   sysctl.d/91-llm-net.conf      BBR + fq, no slow start after idle
   sysctl.d/92-llm-arp.conf      ARP flux fix (ethernet + Wi-Fi in one subnet)
