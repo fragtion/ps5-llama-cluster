@@ -539,6 +539,10 @@ llm-cluster ensure       # link address, /etc/hosts, RPC firewall drop-in, keepa
 What `llm-cluster ensure` writes:
 - **The link address**, added to the NetworkManager profile with DHCP still on, and added live.
   The daemon re-adds it if it disappears.
+  - While the cable is out, the daemon leaves the port alone. Adding the address to a port with no active
+    connection makes NetworkManager adopt it as an "external" connection that never runs DHCP again, so the LAN
+    address stays lost after a replug.
+  - If that has happened, the daemon brings the profile back up once there is carrier.
 - **`/etc/hosts`**: `ps5a` and `ps5b` resolve to the link addresses.
 - **`ggml-rpc.service.d/link.conf`**: only the coordinator may connect to the RPC port.
 - **`/etc/keepalived/keepalived.conf`**: unicast VRRP over the link. The worker gets
@@ -786,6 +790,17 @@ changing models or builds, or move it to a [cache drive](#optional-a-cache-drive
   kernel (see [step 5](#5-kernel-updates-without-reflashing)).
 - **The clock jumps at boot.** The PS5 starts Linux with the clock from its last shutdown, and it
   jumps when NTP syncs. `llm-peerd` therefore times everything with a monotonic clock.
+
+#### A replugged ethernet cable lost the LAN address
+Fixed on 2026-11-17.
+- **Symptom:** after the cable is unplugged and plugged back in, the console keeps its link address but never gets
+  its LAN address back. `nmcli device` shows `enp64s0f2` as "connected (externally)" on a connection named
+  `enp64s0f2`, and the gateway VIP moves to the other console.
+- **Cause:** `llm-peerd` re-adds the link address on every loop. It used to do that while the cable was out, when
+  the port had no active connection. NetworkManager then adopted the port as an "external" connection, with no DHCP,
+  and never went back to the real profile.
+- **Now:** without carrier the daemon leaves the port alone, and if NetworkManager has adopted the port it brings
+  the profile back up. To recover by hand on an older install: `nmcli connection up "Wired connection 1"`.
 
 #### The router may not answer the ethernet port
 Some routers never answer ARP on the consoles' ethernet ports, though every other LAN host can

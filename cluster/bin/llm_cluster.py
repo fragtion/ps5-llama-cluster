@@ -68,13 +68,46 @@ def write_if_changed(path, text):
     return True
 
 
+def link_profile(iface):
+    """The port's own NetworkManager profile: DHCP for the LAN address, plus the link address.
+
+    Never the "external" connection NetworkManager generates (manual, no DHCP) when it finds an address on
+    the port that it didn't set. Once that one is active, NetworkManager never runs DHCP on the port again,
+    so the LAN address stays lost even after the cable is replugged."""
+    for uuid in run("nmcli", "-g", "UUID", "connection", "show").splitlines():
+        fields = run("nmcli", "-g", "connection.type,connection.interface-name,ipv4.method",
+                     "connection", "show", uuid).splitlines()
+        if fields == ["802-3-ethernet", iface, "auto"]:
+            return uuid
+    return None
+
+
+def has_carrier(iface):
+    try:
+        return Path(f"/sys/class/net/{iface}/carrier").read_text().strip() == "1"
+    except OSError:  # the port is administratively down
+        return False
+
+
 def ensure_link(cfg):
     iface = cfg["link"]["interface"]
     cidr = f"{cfg['self']['link']}/{ipaddress.ip_network(cfg['link']['subnet']).prefixlen}"
-    conn = run("nmcli", "-g", "GENERAL.CONNECTION", "device", "show", iface)
+    profile = link_profile(iface)
+    if not profile:  # NetworkManager doesn't manage the port: keep the address by hand
+        if cidr not in run("ip", "-4", "-o", "addr", "show", "dev", iface):
+            run("ip", "addr", "replace", cidr, "dev", iface)
+        return
     # in the profile, so NetworkManager keeps it across reconnects (DHCP still provides the LAN address)
-    if conn and run("nmcli", "-g", "ipv4.addresses", "connection", "show", conn) != cidr:
-        run("nmcli", "connection", "modify", conn, "ipv4.addresses", cidr)
+    if run("nmcli", "-g", "ipv4.addresses", "connection", "show", profile) != cidr:
+        run("nmcli", "connection", "modify", profile, "ipv4.addresses", cidr)
+    if run("nmcli", "-g", "GENERAL.CON-UUID", "device", "show", iface) != profile:
+        # The profile isn't on the port. Either the cable is out, and NetworkManager brings the profile back
+        # by itself when it returns (adding the address by hand now is what makes it adopt the port as
+        # "external"), or that adoption already happened. With carrier, hand the port back to the profile;
+        # --wait 0 so DHCP doesn't hold up llm-peerd's loop.
+        if has_carrier(iface):
+            run("nmcli", "--wait", "0", "connection", "up", profile)
+        return
     if cidr not in run("ip", "-4", "-o", "addr", "show", "dev", iface):
         run("ip", "addr", "replace", cidr, "dev", iface)
 
