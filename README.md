@@ -98,6 +98,37 @@ Measured with MTP speculative decoding (`--spec-type draft-mtp`).
 Everything sits resident in GPU memory. Nothing streams from disk at inference time, so the
 weights can live on a cheap HDD or USB drive.
 
+### Faster at long context: a 35B-A3B MoE (measured, not yet the default)
+
+The 27B is dense, so every generated token reads all of its weights. At long context that adds up: 8 tok/s at 128K.
+[Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF) reads only a fraction of its weights
+per token. It's built on the Qwen3.6-35B-A3B architecture (`qwen35moe`), with 3B active parameters, an MTP layer,
+262K context and vision. It runs on the same llama.cpp build.
+
+**Measured on the pair, 2026-11-17.** All runs used MTP, greedy sampling and q8_0 KV. At each depth, the server
+prefilled 2,048 new tokens and generated 128. Cells show prefill / generation in tok/s:
+
+| Depth | 27B IQ3_S, pooled | Ornith, one console | Ornith, pooled |
+|---|---|---|---|
+| 0 | 120 / 24.7 | 706 / 103.5 | 478 / 94.9 |
+| 32K | 75 / 20.6 | 356 / 74.4 | 255 / 68.6 |
+| 64K | 54 / 13.1 | 191 / 53.7 | 146 / 48.0 |
+| 128K | ~41 / ~8 | — | 83 / 38.3 |
+| 248K | — | — | 46 / 20.2 |
+
+- **Generation is 3.3–4.8× faster at every depth.** A cold 131K-token prompt takes about 12 minutes instead
+  of about 35.
+- **Pooling costs this model almost nothing in generation:** 95 against 103.5 tok/s at depth 0. Its per-token
+  traffic between the consoles is small.
+- **Deep prefill gains least,** about 2× at 128K. At that depth Vulkan flash attention dominates, whatever the
+  model.
+- **The benchmark file was a 10.4 GB speed stand-in:** the official Q4_K_M with its experts requantized to IQ2_XXS,
+  using a local imatrix. For real use, take a ~17 GB quant made from the original weights, such as mudler's
+  APEX-MTP-I-Compact (17.4 GB). Expect generation 10–20% lower than the table. With vision it needs about 18.3 GB
+  free on the coordinator, so a [cache drive](#optional-a-cache-drive), or remove the 27B quants.
+- **Flags that differ from the pooled 27B:** `-b 2048 -ub 1024 --ctx-checkpoints 2 --spec-draft-n-max 2`.
+- **Not the default yet,** because its agentic-coding quality hasn't been compared with the 27B's.
+
 ## What you need
 
 - **A PS5 that can be jailbroken, or two for the pool.** This guide was written on firmware **13.60**, and
