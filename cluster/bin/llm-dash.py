@@ -169,7 +169,12 @@ def collector():
         time.sleep(INTERVAL)
         now = counters()
         try:
-            HISTORY.append(sample(prev, now))
+            row = sample(prev, now)
+            # the clock stepped back (a PS5 boots with its clock ahead, then NTP corrects it): drop the
+            # samples from the "future", or they'd sort after everything that follows
+            while HISTORY and HISTORY[-1][0] >= row[0]:
+                HISTORY.pop()
+            HISTORY.append(row)
         except Exception as e:  # one bad read mustn't stop the history
             print(time.strftime("%F %T"), "sample failed:", e, flush=True)
         prev = now

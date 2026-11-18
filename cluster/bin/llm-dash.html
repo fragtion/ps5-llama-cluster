@@ -192,6 +192,10 @@ async function poll() {
       if (d.error) continue;
       const h = state.hist[n] || (state.hist[n] = []);
       const idx = Object.fromEntries(d.keys.map((k, i) => [k, i]));
+      // the node's clock went back (it booted with its clock ahead): fetch its history again
+      if (d.rows.length && d.rows[d.rows.length - 1][idx.t] < (state.last[n] ?? 0)) {
+        h.length = 0; state.last[n] = 0; continue;
+      }
       for (const row of d.rows) {
         if (row[idx.t] <= (state.last[n] ?? 0)) continue;
         const o = {}; for (const k of d.keys) o[k] = row[idx[k]];
